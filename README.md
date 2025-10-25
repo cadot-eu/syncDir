@@ -25,7 +25,7 @@ Script bash pour synchroniser automatiquement des répertoires locaux avec un se
 
 ```bash
 # Cloner le projet
-git clone https://github.com/votre-username/syncDir.git
+git clone https://github.com/cadot-eu/syncDir.git
 cd syncDir
 
 # Rendre le script exécutable
