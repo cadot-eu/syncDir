@@ -99,10 +99,10 @@ Ajoutez :
 
 ```cron
 # Synchronisation toutes les 15 minutes
-*/15 * * * * /home/michael/syncDir cloud >> ~/.local/log/syncDir/cron.log 2>&1
+*/15 * * * * syncDir cloud >> ~/.local/log/syncDir/cron.log 2>&1
 
 # Synchronisation toutes les heures en mode maitre
-0 * * * * /home/michael/syncDir Documents --maitre >> ~/.local/log/syncDir/cron.log 2>&1
+0 * * * * syncDir Documents --maitre >> ~/.local/log/syncDir/cron.log 2>&1
 ```
 
 ## 🔐 Sécurité
