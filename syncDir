@@ -443,6 +443,7 @@ if [ "$IS_DELETE_DISTANT_STANDALONE" = true ]; then
     IS_RESET=false
     IS_DELETE_DISTANT=true
     SYNC_AS_USER=""
+    CUSTOM_PASSWORD=""
     log_warn "Mode DELETE DISTANT activé - TOUTES les données distantes seront supprimées!"
 else
     DIR_NAME="$1"
@@ -450,6 +451,7 @@ else
     IS_RESET=false
     IS_DELETE_DISTANT=false
     SYNC_AS_USER=""
+    CUSTOM_PASSWORD=""
 
     # Parser les options (après le nom du répertoire)
     shift  # Enlever le premier argument (DIR_NAME)
@@ -479,8 +481,17 @@ else
                 log_info "Synchronisation avec l'utilisateur distant: ${SYNC_AS_USER}Sync"
                 shift 2
                 ;;
+            --password)
+                if [ -z "$2" ]; then
+                    log_error "Option --password nécessite un mot de passe"
+                    exit 1
+                fi
+                CUSTOM_PASSWORD="$2"
+                log_info "Utilisation du mot de passe de chiffrement personnalisé"
+                shift 2
+                ;;
             *)
-                log_error "Option invalide: $1. Utiliser '--maitre', '--reset', '--deleteDistant' ou '--user <nom>'"
+                log_error "Option invalide: $1. Utiliser '--maitre', '--reset', '--deleteDistant' ou '--user <nom> --password <motdepasse>'"
                 exit 1
                 ;;
         esac
@@ -685,7 +696,14 @@ sync_directories() {
     # S'assurer que la config rclone existe (ou la recréer avec le bon utilisateur)
     if [ ! -f "$RCLONE_CONFIG" ] || [ -n "$SYNC_AS_USER" ]; then
         log_info "Configuration rclone pour utilisateur ${REMOTE_USER}..."
-        configure_rclone "$REMOTE_HOST" "$REMOTE_ROOT" "$CRYPT_PASSWORD" "$CRYPT_SALT" "$REMOTE_USER"
+        # Utiliser mot de passe personnalisé si fourni
+        if [ -n "$CUSTOM_PASSWORD" ]; then
+            OBSCURED_CUSTOM=$(rclone obscure "$CUSTOM_PASSWORD")
+            OBSCURED_SALT_CUSTOM=$(rclone obscure "salt_$CUSTOM_PASSWORD")
+            configure_rclone "$REMOTE_HOST" "$REMOTE_ROOT" "$OBSCURED_CUSTOM" "$OBSCURED_SALT_CUSTOM" "$REMOTE_USER"
+        else
+            configure_rclone "$REMOTE_HOST" "$REMOTE_ROOT" "$CRYPT_PASSWORD" "$CRYPT_SALT" "$REMOTE_USER"
+        fi
     fi
     
     # Créer le répertoire de base chiffré distant (via root)
