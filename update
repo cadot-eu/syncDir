@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# Script de mise à jour de syncDir
+# Met à jour depuis le dépôt git et installe dans /usr/local/bin/
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+echo "=== Mise à jour de syncDir ==="
+echo ""
+
+# Vérifier qu'on est bien dans un dépôt git
+if [ ! -d ".git" ]; then
+    echo "Erreur: Ce répertoire n'est pas un dépôt git"
+    exit 1
+fi
+
+# Git pull
+echo "📥 Récupération des dernières modifications..."
+git pull
+
+if [ $? -ne 0 ]; then
+    echo "❌ Erreur lors du git pull"
+    exit 1
+fi
+
+echo "✅ Dépôt mis à jour"
+echo ""
+
+# Copier le script dans /usr/local/bin/
+echo "📦 Installation de syncDir dans /usr/local/bin/..."
+sudo cp syncDir /usr/local/bin/
+
+if [ $? -ne 0 ]; then
+    echo "❌ Erreur lors de la copie"
+    exit 1
+fi
+
+echo "✅ syncDir installé avec succès"
+echo ""
+
+# Créer le répertoire de logs s'il n'existe pas
+echo "📁 Vérification du répertoire de logs..."
+if [ ! -d "$HOME/syncDir_log" ]; then
+    mkdir -p "$HOME/syncDir_log"
+    echo "✅ Répertoire ~/syncDir_log créé"
+else
+    echo "✅ Répertoire ~/syncDir_log existe déjà"
+fi
+echo ""
+
+# Afficher la version
+if command -v syncDir &> /dev/null; then
+    echo "📍 Emplacement: $(which syncDir)"
+    echo ""
+    echo "=== Mise à jour terminée avec succès ==="
+else
+    echo "⚠️  Avertissement: syncDir n'est pas dans le PATH"
+fi

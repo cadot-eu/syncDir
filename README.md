@@ -31,9 +31,26 @@ cd syncDir
 # Rendre le script exécutable
 chmod +x syncDir
 
-# Copier dans votre PATH (optionnel)
+# Copier dans votre PATH
 sudo cp syncDir /usr/local/bin/
+
+# Créer le répertoire de logs
+mkdir -p ~/syncDir_log
 ```
+
+### Mise à jour
+
+Pour mettre à jour syncDir vers la dernière version :
+
+```bash
+cd syncDir
+./update
+```
+
+Le script `update` va :
+- Récupérer les dernières modifications depuis GitHub
+- Installer automatiquement dans `/usr/local/bin/`
+- Créer le répertoire `~/syncDir_log` si nécessaire
 
 ## ⚙️ Configuration
 
@@ -87,6 +104,25 @@ La configuration est sauvegardée dans `~/.syncdir.conf` (protégé en chmod 600
 ./syncDir git/mon-projet
 ```
 
+### 👥 Synchronisation multi-utilisateurs
+
+Pour partager des données entre plusieurs utilisateurs :
+
+```bash
+# Sur l'ordinateur principal (Emeline = maître)
+emeline$ syncDir justificatif_papier --maitre
+
+# Sur l'ordinateur de Michael (accès aux données d'Emeline)
+michael$ mkdir ~/justificatif_papier
+michael$ syncDir justificatif_papier --user emeline
+```
+
+**Important :**
+- Utilisez le même nom de répertoire sur tous les ordinateurs
+- Utilisez la même configuration (serveur distant, mot de passe de chiffrement)
+- L'utilisateur maître aura priorité en cas de conflit
+- L'option `--user` permet d'accéder aux données d'un autre utilisateur
+
 ## 🔄 Automatisation avec Cron
 
 Pour synchroniser automatiquement :
@@ -99,10 +135,10 @@ Ajoutez :
 
 ```cron
 # Synchronisation toutes les 15 minutes
-*/15 * * * * syncDir cloud >> ~/.local/log/syncDir/cron.log 2>&1
+*/15 * * * * syncDir cloud >> ~/syncDir_log/cron.log 2>&1
 
 # Synchronisation toutes les heures en mode maitre
-0 * * * * syncDir Documents --maitre >> ~/.local/log/syncDir/cron.log 2>&1
+0 * * * * syncDir Documents --maitre >> ~/syncDir_log/cron.log 2>&1
 ```
 
 ## 🔐 Sécurité

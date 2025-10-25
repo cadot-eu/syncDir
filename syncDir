@@ -109,7 +109,7 @@ syncDir - Script de Synchronisation SSH Bidirectionnelle
 =========================================================
 
 USAGE:
-    syncDir <repertoire> [maitre|reset|deleteDistant]
+    syncDir <repertoire> [--maitre|--reset|--deleteDistant] [--user <username>]
     syncDir --deleteDistant
     syncDir --help
 
@@ -123,23 +123,23 @@ PARAMÈTRES:
                     Exemple: domo → synchronise /home/michael/domo/
                     Exemple: Downloads/ecole → synchronise /home/michael/Downloads/ecole/
 
-    maitre          Mode priorité locale (optionnel)
+    --maitre        Mode priorité locale (optionnel)
                     En cas de conflit, le fichier local est conservé
                     Synchronisation unidirectionnelle LOCAL → DISTANT
 
-    reset           Réinitialisation du distant (optionnel)
+    --reset         Réinitialisation du distant (optionnel)
                     Efface complètement le répertoire distant
                     Force une synchronisation initiale LOCAL → DISTANT
 
-    deleteDistant   Suppression complète du distant (optionnel)
+    --deleteDistant Suppression complète du distant (optionnel)
                     Efface TOUTES les données de l'utilisateur distant
                     Supprime /home/michaelSync/encrypted/* complètement
                     ATTENTION: Toutes les données distantes seront perdues!
 
-    --deleteDistant Suppression complète du distant (option standalone)
-                    Identique à deleteDistant mais sans nécessiter de répertoire
-                    Efface TOUTES les données de /home/michaelSync/encrypted/*
-                    ATTENTION: Toutes les données distantes seront perdues!
+    --user <nom>    Spécifie l'utilisateur distant à utiliser (optionnel)
+                    Permet de synchroniser depuis le répertoire d'un autre utilisateur
+                    Exemple: --user emeline → utilise emelineSync au lieu de michaelSync
+                    Utile pour partager des données entre plusieurs utilisateurs
 
     --help          Affiche cette aide
 
@@ -148,19 +148,22 @@ EXEMPLES:
     syncDir domo
 
     # Synchronisation avec priorité au local
-    syncDir domo maitre
+    syncDir domo --maitre
 
     # Réinitialiser le distant et resynchroniser
-    syncDir domo reset
+    syncDir domo --reset
 
-    # Supprimer toutes les données distantes (avec répertoire)
-    syncDir domo deleteDistant
-
-    # Supprimer toutes les données distantes (sans répertoire)
+    # Supprimer toutes les données distantes
     syncDir --deleteDistant
 
     # Synchroniser un sous-répertoire
     syncDir Downloads/ecole
+    
+    # Synchroniser depuis le répertoire d'un autre utilisateur
+    syncDir justificatif_papier --user emeline
+    
+    # Combiner plusieurs options
+    syncDir Documents --maitre --user emeline
 
 MODES DE FONCTIONNEMENT:
 
@@ -313,8 +316,8 @@ if [ "$1" == "--deleteDistant" ]; then
 else
     IS_DELETE_DISTANT_STANDALONE=false
     
-    if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-        log_error "Usage: syncDir <repertoire> [maitre|reset|deleteDistant]"
+    if [ $# -lt 1 ]; then
+        log_error "Usage: syncDir <repertoire> [--maitre|--reset|--deleteDistant] [--user <username>]"
         echo "Utilisez 'syncDir --help' pour plus d'informations"
         exit 1
     fi
@@ -387,8 +390,8 @@ EOF
     echo "Configuration sauvegardée dans $CONFIG_FILE"
     echo ""
     
-    # Configurer rclone
-    configure_rclone "$remote_host" "$remote_root" "$obscured_password" "$obscured_salt"
+    # Configurer rclone (avec l'utilisateur par défaut)
+    configure_rclone "$remote_host" "$remote_root" "$obscured_password" "$obscured_salt" "${LOCAL_USER}Sync"
 }
 
 configure_rclone() {
@@ -396,6 +399,7 @@ configure_rclone() {
     local user="$2"
     local crypt_pass="$3"
     local crypt_salt="$4"
+    local remote_user="${5:-${LOCAL_USER}Sync}"  # Utiliser l'utilisateur passé en paramètre ou LOCAL_USER par défaut
     
     mkdir -p "$(dirname "$RCLONE_CONFIG")"
     
@@ -404,12 +408,12 @@ configure_rclone() {
 [remote_sftp]
 type = sftp
 host = $host
-user = ${LOCAL_USER}Sync
+user = $remote_user
 key_file = ${LOCAL_BASE}/.ssh/id_rsa
 
 [remote_crypt]
 type = crypt
-remote = remote_sftp:/home/${LOCAL_USER}Sync/encrypted
+remote = remote_sftp:/home/$remote_user/encrypted
 password = $crypt_pass
 password2 = $crypt_salt
 filename_encryption = standard
@@ -438,33 +442,49 @@ if [ "$IS_DELETE_DISTANT_STANDALONE" = true ]; then
     IS_MASTER=false
     IS_RESET=false
     IS_DELETE_DISTANT=true
+    SYNC_AS_USER=""
     log_warn "Mode DELETE DISTANT activé - TOUTES les données distantes seront supprimées!"
 else
     DIR_NAME="$1"
     IS_MASTER=false
     IS_RESET=false
     IS_DELETE_DISTANT=false
+    SYNC_AS_USER=""
 
-    if [ $# -eq 2 ]; then
-        case "$2" in
+    # Parser les options (après le nom du répertoire)
+    shift  # Enlever le premier argument (DIR_NAME)
+    while [ $# -gt 0 ]; do
+        case "$1" in
             maitre|--maitre)
                 IS_MASTER=true
                 log_info "Mode MAITRE activé - priorité au fichier local en cas de conflit"
+                shift
                 ;;
             reset|--reset)
                 IS_RESET=true
                 log_info "Mode RESET activé - effacement du répertoire distant"
+                shift
                 ;;
             deleteDistant|--deleteDistant)
                 IS_DELETE_DISTANT=true
                 log_warn "Mode DELETE DISTANT activé - TOUTES les données distantes seront supprimées!"
+                shift
+                ;;
+            --user)
+                if [ -z "$2" ]; then
+                    log_error "Option --user nécessite un nom d'utilisateur"
+                    exit 1
+                fi
+                SYNC_AS_USER="$2"
+                log_info "Synchronisation avec l'utilisateur distant: ${SYNC_AS_USER}Sync"
+                shift 2
                 ;;
             *)
-                log_error "Option invalide: $2. Utiliser 'maitre/--maitre', 'reset/--reset' ou 'deleteDistant/--deleteDistant'"
+                log_error "Option invalide: $1. Utiliser '--maitre', '--reset', '--deleteDistant' ou '--user <nom>'"
                 exit 1
                 ;;
         esac
-    fi
+    done
 fi
 
 if [ "$IS_DELETE_DISTANT_STANDALONE" = false ]; then
@@ -490,9 +510,14 @@ else
     STATE_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.state"
 fi
 
-REMOTE_USER="${LOCAL_USER}Sync"
-
-log_info "Utilisateur local détecté: ${LOCAL_USER}"
+# Déterminer l'utilisateur distant à utiliser
+if [ -n "$SYNC_AS_USER" ]; then
+    REMOTE_USER="${SYNC_AS_USER}Sync"
+    log_info "Utilisateur local: ${LOCAL_USER}, Utilisateur distant: ${REMOTE_USER}"
+else
+    REMOTE_USER="${LOCAL_USER}Sync"
+    log_info "Utilisateur local détecté: ${LOCAL_USER}"
+fi
 
 #############################################
 # Vérifications préalables
@@ -657,10 +682,10 @@ EOFREMOTE
 sync_directories() {
     local remote_crypt="remote_crypt:${DIR_NAME}"
     
-    # S'assurer que la config rclone existe
-    if [ ! -f "$RCLONE_CONFIG" ]; then
-        log_info "Configuration rclone manquante, création..."
-        configure_rclone "$REMOTE_HOST" "$REMOTE_ROOT" "$CRYPT_PASSWORD" "$CRYPT_SALT"
+    # S'assurer que la config rclone existe (ou la recréer avec le bon utilisateur)
+    if [ ! -f "$RCLONE_CONFIG" ] || [ -n "$SYNC_AS_USER" ]; then
+        log_info "Configuration rclone pour utilisateur ${REMOTE_USER}..."
+        configure_rclone "$REMOTE_HOST" "$REMOTE_ROOT" "$CRYPT_PASSWORD" "$CRYPT_SALT" "$REMOTE_USER"
     fi
     
     # Créer le répertoire de base chiffré distant (via root)
