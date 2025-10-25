@@ -216,3 +216,4 @@ MIT License - voir le fichier [LICENSE](LICENSE)
 - ⚡ Optimisations de performance
 - 🛠️ Mise à jour automatique de rclone
 - 📖 Documentation complète
+# syncDir
