@@ -1,0 +1,910 @@
+#!/bin/bash
+
+#############################################
+# syncDir - Script de synchronisation SSH bidirectionnelle
+# Usage: syncDir <repertoire> [maitre|reset]
+#############################################
+
+# Configuration par défaut
+LOCAL_USER=$(whoami)
+LOCAL_BASE="/home/${LOCAL_USER}"
+CONFIG_FILE="${LOCAL_BASE}/.syncdir.conf"
+RCLONE_CONFIG="${LOCAL_BASE}/.config/rclone/rclone.conf"
+LOCK_DIR="/tmp/syncDir_locks"
+LOG_DIR="${LOCAL_BASE}/.local/log/syncDir"
+
+# Couleurs pour les logs (désactivées si lancé par cron)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    NC=''
+fi
+
+#############################################
+# Fonctions utilitaires
+#############################################
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+    [ -d "$LOG_DIR" ] && echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir.log"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    [ -d "$LOG_DIR" ] && echo "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir.log"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+    [ -d "$LOG_DIR" ] && echo "[WARN] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir.log"
+}
+
+# Créer les répertoires nécessaires
+mkdir -p "$LOCK_DIR" 2>/dev/null
+mkdir -p "$LOG_DIR" 2>/dev/null
+
+#############################################
+# Vérification et installation de rclone
+#############################################
+
+check_and_install_rclone() {
+    local rclone_version=""
+    local needs_update=false
+    
+    if ! command -v rclone &> /dev/null; then
+        log_warn "rclone n'est pas installé. Installation en cours..."
+        needs_update=true
+    else
+        # Extraire la version de rclone
+        rclone_version=$(rclone --version | head -1 | grep -oP 'v\K[0-9]+\.[0-9]+')
+        log_info "rclone installé : version $rclone_version"
+        
+        # Vérifier si la version est inférieure à 1.63 (bisync amélioré)
+        if [ -n "$rclone_version" ]; then
+            local major=$(echo $rclone_version | cut -d. -f1)
+            local minor=$(echo $rclone_version | cut -d. -f2)
+            
+            if [ "$major" -lt 1 ] || ([ "$major" -eq 1 ] && [ "$minor" -lt 63 ]); then
+                log_warn "Version rclone trop ancienne ($rclone_version < 1.63). Mise à jour recommandée..."
+                needs_update=true
+            fi
+        fi
+    fi
+    
+    if [ "$needs_update" = true ]; then
+        log_info "Téléchargement et installation de la dernière version de rclone..."
+        curl -s https://rclone.org/install.sh | sudo bash
+        
+        if [ $? -eq 0 ]; then
+            local new_version=$(rclone --version | head -1)
+            log_info "rclone mis à jour avec succès : $new_version"
+        else
+            log_error "Échec de la mise à jour de rclone"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Vérifier/installer rclone au démarrage
+if ! check_and_install_rclone; then
+    log_error "Impossible de continuer sans rclone"
+    exit 1
+fi
+
+#############################################
+# Fonction d'aide
+#############################################
+
+show_help() {
+    cat << 'HELP'
+syncDir - Script de Synchronisation SSH Bidirectionnelle
+=========================================================
+
+USAGE:
+    syncDir <repertoire> [maitre|reset|deleteDistant]
+    syncDir --deleteDistant
+    syncDir --help
+
+DESCRIPTION:
+    Synchronise automatiquement un répertoire local avec un répertoire distant
+    via SSH. Gère la synchronisation bidirectionnelle, la création automatique
+    de l'utilisateur distant, et offre plusieurs modes de fonctionnement.
+
+PARAMÈTRES:
+    <repertoire>    Nom du répertoire à synchroniser (relatif à /home/{user}/)
+                    Exemple: domo → synchronise /home/michael/domo/
+                    Exemple: Downloads/ecole → synchronise /home/michael/Downloads/ecole/
+
+    maitre          Mode priorité locale (optionnel)
+                    En cas de conflit, le fichier local est conservé
+                    Synchronisation unidirectionnelle LOCAL → DISTANT
+
+    reset           Réinitialisation du distant (optionnel)
+                    Efface complètement le répertoire distant
+                    Force une synchronisation initiale LOCAL → DISTANT
+
+    deleteDistant   Suppression complète du distant (optionnel)
+                    Efface TOUTES les données de l'utilisateur distant
+                    Supprime /home/michaelSync/encrypted/* complètement
+                    ATTENTION: Toutes les données distantes seront perdues!
+
+    --deleteDistant Suppression complète du distant (option standalone)
+                    Identique à deleteDistant mais sans nécessiter de répertoire
+                    Efface TOUTES les données de /home/michaelSync/encrypted/*
+                    ATTENTION: Toutes les données distantes seront perdues!
+
+    --help          Affiche cette aide
+
+EXEMPLES:
+    # Synchronisation normale bidirectionnelle
+    syncDir domo
+
+    # Synchronisation avec priorité au local
+    syncDir domo maitre
+
+    # Réinitialiser le distant et resynchroniser
+    syncDir domo reset
+
+    # Supprimer toutes les données distantes (avec répertoire)
+    syncDir domo deleteDistant
+
+    # Supprimer toutes les données distantes (sans répertoire)
+    syncDir --deleteDistant
+
+    # Synchroniser un sous-répertoire
+    syncDir Downloads/ecole
+
+MODES DE FONCTIONNEMENT:
+
+    Mode Normal (Bidirectionnel):
+    - Première synchro: Si le distant est vide → LOCAL → DISTANT uniquement
+    - Synchros suivantes: DISTANT → LOCAL puis LOCAL → DISTANT
+    - En cas de conflit: le fichier distant est conservé
+
+    Mode Maitre:
+    - Synchronisation unidirectionnelle LOCAL → DISTANT
+    - Écrase toujours les fichiers distants en cas de conflit
+
+    Mode Reset:
+    - Efface le répertoire distant
+    - Réinitialise l'état de synchronisation
+    - Effectue une synchronisation initiale LOCAL → DISTANT
+
+CONFIGURATION:
+
+    Fichier: ~/.syncdir.conf
+    
+    Lors de la première exécution, le script demande:
+    - Adresse IP ou nom d'hôte du serveur distant
+    - Utilisateur root distant (défaut: root)
+    - Répertoire de base distant (défaut: /home)
+    
+    Le fichier est créé automatiquement et caché dans votre home.
+    Pour reconfigurer, supprimez le fichier: rm ~/.syncdir.conf
+
+CRON (Automatisation):
+
+    Pour automatiser la synchronisation, ajoutez au crontab:
+    
+    crontab -e
+    
+    Exemples:
+    # Synchronisation toutes les 15 minutes
+    */15 * * * * /home/michael/syncDir domo >> /var/log/syncDir/cron.log 2>&1
+    
+    # Synchronisation toutes les heures en mode maitre
+    0 * * * * /home/michael/syncDir domo maitre >> /var/log/syncDir/cron.log 2>&1
+    
+    # Plusieurs répertoires synchronisés
+    */15 * * * * /home/michael/syncDir domo >> /var/log/syncDir/cron.log 2>&1
+    */15 * * * * /home/michael/syncDir projets >> /var/log/syncDir/cron.log 2>&1
+    */30 * * * * /home/michael/syncDir Downloads/ecole >> /var/log/syncDir/cron.log 2>&1
+
+SYNCHRONISATION MULTIPLE:
+
+    Le script supporte la synchronisation de plusieurs répertoires indépendants.
+    Chaque répertoire a son propre fichier de verrou, d'état et ses logs.
+
+VERROUS:
+
+    Emplacement: /tmp/syncDir_locks/{repertoire}.lock
+    
+    Pour éviter les exécutions simultanées. Si un verrou existe:
+    - Processus actif → sortie sans erreur
+    - Processus mort → suppression du verrou et exécution
+    
+    Les / dans les noms sont remplacés par _ dans les verrous.
+    Exemple: Downloads/ecole → Downloads_ecole.lock
+
+LOGS:
+
+    Répertoire: /var/log/syncDir/
+    Fichier: /var/log/syncDir/syncDir.log
+    
+    Niveaux:
+    - [INFO]  : Informations normales (vert)
+    - [WARN]  : Avertissements non bloquants (jaune)
+    - [ERROR] : Erreurs bloquantes (rouge)
+    
+    Consultation:
+    tail -f /var/log/syncDir/syncDir.log
+    grep ERROR /var/log/syncDir/syncDir.log
+    grep "domo" /var/log/syncDir/syncDir.log
+
+FICHIERS D'ÉTAT:
+
+    Emplacement: /tmp/syncDir_locks/{repertoire}.state
+    
+    États possibles:
+    - completed : Synchronisation réussie
+    - partial   : Synchronisation partielle (avec avertissements)
+    - failed    : Échec avec détails
+    
+    Le script reprend automatiquement en cas d'échec précédent.
+
+UTILISATEUR DISTANT:
+
+    Format: {utilisateur_local}Sync
+    Exemple: michael → michaelSync
+    
+    Créé automatiquement lors de la première exécution.
+    Structure: /home/michaelSync/{repertoire}/
+
+RÉSOLUTION DE PROBLÈMES:
+
+    # Vérifier la connexion SSH
+    ssh root@{REMOTE_HOST}
+    
+    # Réinitialisation complète
+    syncDir domo reset
+    
+    # Supprimer un verrou bloqué
+    rm /tmp/syncDir_locks/domo.lock
+    
+    # Reconfigurer
+    rm ~/.syncdir.conf
+    syncDir domo
+
+CODES DE SORTIE:
+    0 - Succès
+    1 - Erreur (voir logs pour détails)
+
+SÉCURITÉ:
+    ✅ Connexion SSH avec clés (pas de mot de passe en clair)
+    ✅ Utilisateur distant dédié (isolation)
+    ✅ Fichier de configuration protégé (chmod 600)
+    ✅ Verrous pour éviter les conflits
+    ✅ Logs détaillés pour audit
+
+LIMITATIONS:
+    - Nécessite rsync installé localement et à distance
+    - Nécessite accès SSH root au serveur distant (pour créer l'utilisateur)
+    - Ne gère pas les conflits de fichiers modifiés simultanément
+
+HELP
+}
+
+#############################################
+# Validation des paramètres
+#############################################
+
+# Afficher l'aide si demandé
+if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+    show_help
+    exit 0
+fi
+
+# Gestion de --deleteDistant standalone
+if [ "$1" == "--deleteDistant" ]; then
+    if [ $# -ne 1 ]; then
+        log_error "Usage: syncDir --deleteDistant (sans autre argument)"
+        exit 1
+    fi
+    IS_DELETE_DISTANT_STANDALONE=true
+    DIR_NAME="__all__"  # Valeur fictive
+else
+    IS_DELETE_DISTANT_STANDALONE=false
+    
+    if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+        log_error "Usage: syncDir <repertoire> [maitre|reset|deleteDistant]"
+        echo "Utilisez 'syncDir --help' pour plus d'informations"
+        exit 1
+    fi
+fi
+
+#############################################
+# Création et chargement de la configuration
+#############################################
+
+create_config() {
+    echo "Configuration initiale de syncDir"
+    echo "================================="
+    echo ""
+    
+    # Demander l'hôte distant
+    read -p "Adresse IP ou nom d'hôte du serveur distant : " remote_host
+    if [ -z "$remote_host" ]; then
+        echo "Erreur : l'hôte distant est obligatoire"
+        exit 1
+    fi
+    
+    # Demander l'utilisateur root distant
+    read -p "Utilisateur root distant [root] : " remote_root
+    remote_root=${remote_root:-root}
+    
+    # Demander le répertoire de base distant
+    read -p "Répertoire de base distant [/home] : " remote_base
+    remote_base=${remote_base:-/home}
+    
+    # Demander le mot de passe de chiffrement
+    echo ""
+    echo "Configuration du chiffrement rclone"
+    echo "Les fichiers seront chiffrés avant envoi sur le distant"
+    read -sp "Mot de passe de chiffrement : " crypt_password
+    echo ""
+    read -sp "Confirmez le mot de passe : " crypt_password2
+    echo ""
+    
+    if [ "$crypt_password" != "$crypt_password2" ]; then
+        echo "Erreur : les mots de passe ne correspondent pas"
+        exit 1
+    fi
+    
+    if [ -z "$crypt_password" ]; then
+        echo "Erreur : le mot de passe de chiffrement est obligatoire"
+        exit 1
+    fi
+    
+    # Générer les mots de passe obscurcis pour rclone
+    local obscured_password=$(echo "$crypt_password" | rclone obscure -)
+    local obscured_salt=$(rclone obscure "salt_${crypt_password}")
+    
+    # Créer le fichier de configuration
+    cat > "$CONFIG_FILE" <<EOF
+# Configuration syncDir
+# Généré automatiquement le $(date '+%Y-%m-%d %H:%M:%S')
+
+# Serveur distant
+REMOTE_HOST="$remote_host"
+REMOTE_ROOT="$remote_root"
+REMOTE_BASE="$remote_base"
+
+# Chiffrement
+CRYPT_PASSWORD="$obscured_password"
+CRYPT_SALT="$obscured_salt"
+EOF
+    
+    chmod 600 "$CONFIG_FILE"
+    echo ""
+    echo "Configuration sauvegardée dans $CONFIG_FILE"
+    echo ""
+    
+    # Configurer rclone
+    configure_rclone "$remote_host" "$remote_root" "$obscured_password" "$obscured_salt"
+}
+
+configure_rclone() {
+    local host="$1"
+    local user="$2"
+    local crypt_pass="$3"
+    local crypt_salt="$4"
+    
+    mkdir -p "$(dirname "$RCLONE_CONFIG")"
+    
+    # Créer la configuration rclone
+    cat > "$RCLONE_CONFIG" <<EOF
+[remote_sftp]
+type = sftp
+host = $host
+user = ${LOCAL_USER}Sync
+key_file = ${LOCAL_BASE}/.ssh/id_rsa
+
+[remote_crypt]
+type = crypt
+remote = remote_sftp:/home/${LOCAL_USER}Sync/encrypted
+password = $crypt_pass
+password2 = $crypt_salt
+filename_encryption = standard
+directory_name_encryption = true
+EOF
+    
+    chmod 600 "$RCLONE_CONFIG"
+    log_info "Configuration rclone créée avec chiffrement activé"
+}
+
+# Vérifier si le fichier de configuration existe
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Aucun fichier de configuration trouvé."
+    create_config
+fi
+
+# Charger la configuration
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+else
+    echo "Erreur : impossible de charger la configuration"
+    exit 1
+fi
+
+if [ "$IS_DELETE_DISTANT_STANDALONE" = true ]; then
+    IS_MASTER=false
+    IS_RESET=false
+    IS_DELETE_DISTANT=true
+    log_warn "Mode DELETE DISTANT activé - TOUTES les données distantes seront supprimées!"
+else
+    DIR_NAME="$1"
+    IS_MASTER=false
+    IS_RESET=false
+    IS_DELETE_DISTANT=false
+
+    if [ $# -eq 2 ]; then
+        case "$2" in
+            maitre|--maitre)
+                IS_MASTER=true
+                log_info "Mode MAITRE activé - priorité au fichier local en cas de conflit"
+                ;;
+            reset|--reset)
+                IS_RESET=true
+                log_info "Mode RESET activé - effacement du répertoire distant"
+                ;;
+            deleteDistant|--deleteDistant)
+                IS_DELETE_DISTANT=true
+                log_warn "Mode DELETE DISTANT activé - TOUTES les données distantes seront supprimées!"
+                ;;
+            *)
+                log_error "Option invalide: $2. Utiliser 'maitre/--maitre', 'reset/--reset' ou 'deleteDistant/--deleteDistant'"
+                exit 1
+                ;;
+        esac
+    fi
+fi
+
+if [ "$IS_DELETE_DISTANT_STANDALONE" = false ]; then
+    # Détecter si le chemin est absolu ou relatif
+    if [[ "$DIR_NAME" = /* ]]; then
+        # Chemin absolu : utiliser tel quel
+        LOCAL_DIR="$DIR_NAME"
+        # Extraire le nom de base pour les fichiers lock
+        DIR_NAME_SAFE="$(basename "$DIR_NAME")"
+    else
+        # Chemin relatif : par rapport à LOCAL_BASE
+        LOCAL_DIR="${LOCAL_BASE}/${DIR_NAME}"
+        # Remplacer les / par _ dans le nom pour les fichiers lock
+        DIR_NAME_SAFE="${DIR_NAME//\//_}"
+    fi
+    LOCK_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.lock"
+    STATE_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.state"
+else
+    # Mode standalone --deleteDistant
+    LOCAL_DIR=""  # Non utilisé
+    DIR_NAME_SAFE="__deleteall__"
+    LOCK_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.lock"
+    STATE_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.state"
+fi
+
+REMOTE_USER="${LOCAL_USER}Sync"
+
+log_info "Utilisateur local détecté: ${LOCAL_USER}"
+
+#############################################
+# Vérifications préalables
+#############################################
+
+# Vérifier que le répertoire local existe (sauf en mode deleteDistant standalone)
+if [ "$IS_DELETE_DISTANT_STANDALONE" = false ] && [ ! -d "$LOCAL_DIR" ]; then
+    log_error "Le répertoire local n'existe pas: $LOCAL_DIR"
+    exit 1
+fi
+
+# Vérifier la connectivité SSH
+if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "${REMOTE_ROOT}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
+    log_error "Impossible de se connecter au serveur distant ${REMOTE_HOST}"
+    exit 1
+fi
+
+#############################################
+# Gestion du verrou (pour éviter les exécutions simultanées)
+#############################################
+
+acquire_lock() {
+    if [ -f "$LOCK_FILE" ]; then
+        local pid=$(cat "$LOCK_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            log_warn "Une synchronisation est déjà en cours (PID: $pid)"
+            exit 0
+        else
+            log_warn "Suppression d'un verrou obsolète (PID: $pid)"
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+    echo $$ > "$LOCK_FILE"
+}
+
+release_lock() {
+    rm -f "$LOCK_FILE"
+}
+
+trap release_lock EXIT INT TERM
+
+acquire_lock
+
+#############################################
+# Génération de la clé SSH si nécessaire
+#############################################
+
+ensure_ssh_key() {
+    local ssh_dir="${LOCAL_BASE}/.ssh"
+    local ssh_key="${ssh_dir}/id_rsa"
+    local ssh_pub="${ssh_key}.pub"
+    
+    # Créer le répertoire .ssh s'il n'existe pas
+    if [ ! -d "$ssh_dir" ]; then
+        log_info "Création du répertoire .ssh"
+        mkdir -p "$ssh_dir"
+        chmod 700 "$ssh_dir"
+    fi
+    
+    # Vérifier si la clé existe
+    if [ ! -f "$ssh_key" ] || [ ! -f "$ssh_pub" ]; then
+        log_warn "Clé SSH non trouvée, génération automatique..."
+        
+        # Générer une nouvelle clé SSH sans passphrase
+        ssh-keygen -t rsa -b 4096 -f "$ssh_key" -N "" -C "${LOCAL_USER}@syncDir-$(date +%Y%m%d)"
+        
+        if [ $? -eq 0 ]; then
+            log_info "Clé SSH générée avec succès: $ssh_key"
+            chmod 600 "$ssh_key"
+            chmod 644 "$ssh_pub"
+        else
+            log_error "Échec de la génération de la clé SSH"
+            return 1
+        fi
+    else
+        log_info "Clé SSH existante trouvée: $ssh_key"
+    fi
+    
+    return 0
+}
+
+#############################################
+# Création de l'utilisateur distant si nécessaire
+#############################################
+
+create_remote_user() {
+    log_info "Vérification de l'existence de l'utilisateur distant: ${REMOTE_USER}"
+    
+    local user_exists=false
+    if ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "id ${REMOTE_USER} &>/dev/null"; then
+        user_exists=true
+        log_info "L'utilisateur ${REMOTE_USER} existe déjà"
+    else
+        log_info "Création de l'utilisateur distant: ${REMOTE_USER}"
+        
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFREMOTE
+            # Créer l'utilisateur avec son home directory
+            sudo useradd -m -s /bin/bash ${REMOTE_USER}
+            
+            # Créer le répertoire encrypted dans le home de l'utilisateur
+            sudo mkdir -p /home/${REMOTE_USER}/encrypted
+            sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}
+            
+            # Configurer SSH pour l'utilisateur
+            sudo mkdir -p /home/${REMOTE_USER}/.ssh
+            sudo chmod 700 /home/${REMOTE_USER}/.ssh
+            sudo chown ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/.ssh
+            
+            echo "Utilisateur ${REMOTE_USER} créé avec succès"
+EOFREMOTE
+        
+        if [ $? -ne 0 ]; then
+            log_error "Échec de la création de l'utilisateur ${REMOTE_USER}"
+            return 1
+        fi
+        
+        log_info "Utilisateur ${REMOTE_USER} créé avec succès"
+    fi
+    
+    # Vérifier et copier la clé SSH (que l'utilisateur existe déjà ou vienne d'être créé)
+    if [ -f "${LOCAL_BASE}/.ssh/id_rsa.pub" ]; then
+        # Vérifier si la clé est déjà présente dans authorized_keys
+        local ssh_key_content=$(cat "${LOCAL_BASE}/.ssh/id_rsa.pub")
+        local key_exists=$(ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+            "sudo grep -F '${ssh_key_content}' /home/${REMOTE_USER}/.ssh/authorized_keys 2>/dev/null || echo ''")
+        
+        if [ -z "$key_exists" ]; then
+            log_info "Copie de la clé SSH publique"
+            cat "${LOCAL_BASE}/.ssh/id_rsa.pub" | ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+                "sudo mkdir -p /home/${REMOTE_USER}/.ssh && \
+                 sudo tee -a /home/${REMOTE_USER}/.ssh/authorized_keys > /dev/null && \
+                 sudo chmod 700 /home/${REMOTE_USER}/.ssh && \
+                 sudo chmod 600 /home/${REMOTE_USER}/.ssh/authorized_keys && \
+                 sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/.ssh"
+            
+            if [ $? -eq 0 ]; then
+                log_info "Clé SSH publique copiée avec succès"
+            else
+                log_error "Échec de la copie de la clé SSH publique"
+                return 1
+            fi
+        else
+            log_info "Clé SSH publique déjà présente dans authorized_keys"
+        fi
+    else
+        log_error "Clé SSH publique non trouvée: ${LOCAL_BASE}/.ssh/id_rsa.pub"
+        return 1
+    fi
+    
+    # Vérifier que le répertoire encrypted existe
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+        "sudo mkdir -p /home/${REMOTE_USER}/encrypted && \
+         sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/encrypted"
+    
+    return 0
+}
+
+#############################################
+# Synchronisation
+#############################################
+
+sync_directories() {
+    local remote_crypt="remote_crypt:${DIR_NAME}"
+    
+    # S'assurer que la config rclone existe
+    if [ ! -f "$RCLONE_CONFIG" ]; then
+        log_info "Configuration rclone manquante, création..."
+        configure_rclone "$REMOTE_HOST" "$REMOTE_ROOT" "$CRYPT_PASSWORD" "$CRYPT_SALT"
+    fi
+    
+    # Créer le répertoire de base chiffré distant (via root)
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo mkdir -p /home/${REMOTE_USER}/encrypted && \
+                                         sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/encrypted"
+    
+    if [ "$IS_MASTER" = true ]; then
+        # Mode MAITRE: local → distant (priorité au local avec suppression)
+        log_info "Synchronisation LOCAL → DISTANT chiffrée (mode maitre avec --delete)"
+        
+        rclone sync "${LOCAL_DIR}/" "${remote_crypt}" \
+            --config "$RCLONE_CONFIG" \
+            --progress \
+            --transfers 4 \
+            --checkers 8 \
+            --contimeout 60s \
+            --timeout 300s \
+            --retries 3 \
+            --low-level-retries 10 \
+            --stats 1s
+        
+        local sync_result=$?
+        
+        # Corriger les permissions sur le distant
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/${DIR_NAME}"
+        
+        if [ $sync_result -eq 0 ]; then
+            log_info "Synchronisation réussie"
+            echo "completed" > "$STATE_FILE"
+            return 0
+        else
+            log_error "Erreur de synchronisation (code: $sync_result)"
+            echo "failed:$sync_result" > "$STATE_FILE"
+            return 1
+        fi
+    else
+        # Mode NORMAL: synchronisation bidirectionnelle
+        # Vérifier si le répertoire distant est vide (méthode rapide)
+        log_info "Vérification de l'état du répertoire distant..."
+        local remote_check=$(rclone lsf "${remote_crypt}" --config "$RCLONE_CONFIG" --max-depth 1 2>/dev/null | head -1)
+        
+        if [ -z "$remote_check" ]; then
+            # Distant vide: on envoie d'abord le local vers le distant
+            log_info "Répertoire distant vide - Synchronisation initiale LOCAL → DISTANT chiffrée"
+            
+            rclone copy "${LOCAL_DIR}/" "${remote_crypt}" \
+                --config "$RCLONE_CONFIG" \
+                --progress \
+                --transfers 4 \
+                --checkers 8 \
+                --update \
+                --use-server-modtime \
+                --no-traverse
+            
+            local sync_result=$?
+            
+            # Corriger les permissions sur le distant
+            ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/${DIR_NAME}"
+            
+            if [ $sync_result -eq 0 ]; then
+                log_info "Synchronisation initiale réussie"
+                echo "completed" > "$STATE_FILE"
+                return 0
+            else
+                log_error "Erreur lors de la synchronisation initiale (code: $sync_result)"
+                echo "failed:initial:$sync_result" > "$STATE_FILE"
+                return 1
+            fi
+        else
+            # Distant non vide: synchronisation bidirectionnelle avec bisync
+            local bisync_workdir="${LOCAL_BASE}/.cache/rclone/bisync/${DIR_NAME_SAFE}"
+            mkdir -p "$bisync_workdir"
+            
+            # Vérifier si bisync est déjà initialisé
+            if [ ! -f "${bisync_workdir}/.synced" ]; then
+                log_info "Première synchronisation bisync - initialisation..."
+                
+                rclone bisync "${LOCAL_DIR}" "${remote_crypt}" \
+                    --config "$RCLONE_CONFIG" \
+                    --resync \
+                    --workdir "$bisync_workdir" \
+                    --verbose \
+                    --transfers 8 \
+                    --checkers 16 \
+                    --create-empty-src-dirs \
+                    --compare size,modtime \
+                    --slow-hash-sync-only \
+                    --resilient
+                
+                local sync_result=$?
+                
+                if [ $sync_result -eq 0 ]; then
+                    touch "${bisync_workdir}/.synced"
+                    log_info "Synchronisation bisync initialisée avec succès"
+                else
+                    log_error "Erreur lors de l'initialisation bisync (code: $sync_result)"
+                    echo "failed:bisync_init:$sync_result" > "$STATE_FILE"
+                    return 1
+                fi
+            else
+                log_info "Synchronisation bidirectionnelle rapide (bisync)..."
+                
+                rclone bisync "${LOCAL_DIR}" "${remote_crypt}" \
+                    --config "$RCLONE_CONFIG" \
+                    --workdir "$bisync_workdir" \
+                    --verbose \
+                    --transfers 8 \
+                    --checkers 16 \
+                    --create-empty-src-dirs \
+                    --compare size,modtime \
+                    --slow-hash-sync-only \
+                    --resilient \
+                    --max-lock 2m
+                
+                local sync_result=$?
+                
+                # Code 0 = succès, code 2 = succès avec bisync (acceptable)
+                if [ $sync_result -eq 0 ] || [ $sync_result -eq 2 ]; then
+                    log_info "Synchronisation bidirectionnelle réussie"
+                    echo "completed" > "$STATE_FILE"
+                else
+                    log_error "Erreur lors de la synchronisation bisync (code: $sync_result)"
+                    log_warn "Essayez avec --reset pour réinitialiser la synchronisation"
+                    echo "failed:bisync:$sync_result" > "$STATE_FILE"
+                    return 1
+                fi
+            fi
+            
+            # Corriger les permissions sur le distant
+            ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/encrypted" 2>/dev/null
+            
+            return 0
+        fi
+    fi
+}
+
+#############################################
+# Vérification de l'état précédent (reprise)
+#############################################
+
+check_previous_state() {
+    if [ -f "$STATE_FILE" ]; then
+        local state=$(cat "$STATE_FILE")
+        if [[ "$state" == "failed"* ]] || [[ "$state" == "partial"* ]]; then
+            log_warn "Détection d'une synchronisation précédente incomplète: $state"
+            log_info "Reprise de la synchronisation..."
+        fi
+    fi
+}
+
+#############################################
+# Exécution principale
+#############################################
+
+if [ "$IS_DELETE_DISTANT_STANDALONE" = true ]; then
+    log_info "===== Mode suppression complète des données distantes ====="
+else
+    log_info "===== Début de la synchronisation pour: $DIR_NAME ====="
+fi
+
+if [ "$IS_DELETE_DISTANT_STANDALONE" = false ]; then
+    check_previous_state
+fi
+
+# S'assurer que la clé SSH existe
+if ! ensure_ssh_key; then
+    log_error "Impossible de générer/vérifier la clé SSH"
+    exit 1
+fi
+
+if ! create_remote_user; then
+    log_error "Impossible de créer/vérifier l'utilisateur distant"
+    exit 1
+fi
+
+# Si mode deleteDistant, effacer TOUTES les données distantes
+if [ "$IS_DELETE_DISTANT" = true ]; then
+    log_warn "========================================"
+    log_warn "ATTENTION: Suppression de TOUTES les données distantes!"
+    if [ "$IS_DELETE_DISTANT_STANDALONE" = true ]; then
+        log_warn "Mode: Suppression complète (--deleteDistant)"
+    else
+        log_warn "Mode: Suppression pour répertoire $DIR_NAME"
+    fi
+    log_warn "Répertoire: /home/${REMOTE_USER}/encrypted/*"
+    log_warn "========================================"
+    
+    read -p "Confirmez la suppression complète (tapez 'OUI' en majuscules): " confirmation
+    
+    if [ "$confirmation" != "OUI" ]; then
+        log_info "Suppression annulée par l'utilisateur"
+        exit 0
+    fi
+    
+    log_warn "Suppression en cours..."
+    
+    # Supprimer complètement l'utilisateur distant et son répertoire home
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFDELETE
+set -e
+REMOTE_USER="${REMOTE_USER}"
+
+echo "Suppression complète de l'utilisateur \${REMOTE_USER} et son répertoire home..."
+
+# Supprimer l'utilisateur et son home (-r pour supprimer le home)
+if id "\${REMOTE_USER}" &>/dev/null; then
+    sudo userdel -r "\${REMOTE_USER}" 2>/dev/null || true
+    echo "Utilisateur \${REMOTE_USER} supprimé"
+else
+    echo "Utilisateur \${REMOTE_USER} n'existe pas"
+fi
+
+# Supprimer manuellement le répertoire home s'il reste
+if [ -d "/home/\${REMOTE_USER}" ]; then
+    sudo rm -rf "/home/\${REMOTE_USER}"
+    echo "Répertoire /home/\${REMOTE_USER} supprimé"
+fi
+
+echo "Suppression terminée"
+EOFDELETE
+    
+    log_info "L'utilisateur distant ${REMOTE_USER} et son répertoire home ont été complètement supprimés"
+    log_info "Répertoire /home/${REMOTE_USER}/ n'existe plus"
+    
+    # Supprimer les fichiers d'état locaux
+    rm -f "$STATE_FILE"
+    rm -f "${LOCK_DIR}"/*.state 2>/dev/null
+    
+    log_info "Opération terminée avec succès"
+    exit 0
+fi
+
+# Si mode reset, effacer le répertoire distant
+if [ "$IS_RESET" = true ]; then
+    log_warn "Effacement du répertoire distant: /home/${REMOTE_USER}/${DIR_NAME}"
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo rm -rf /home/${REMOTE_USER}/${DIR_NAME}/* /home/${REMOTE_USER}/${DIR_NAME}/.*" 2>/dev/null
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo mkdir -p /home/${REMOTE_USER}/${DIR_NAME} && sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/${DIR_NAME}"
+    log_info "Répertoire distant effacé - synchronisation initiale LOCAL → DISTANT"
+    rm -f "$STATE_FILE"
+fi
+
+if sync_directories; then
+    log_info "===== Synchronisation terminée avec succès ====="
+    exit 0
+else
+    log_error "===== Échec de la synchronisation ====="
+    exit 1
+fi

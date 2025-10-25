@@ -1,0 +1,45 @@
+# Fichiers de configuration sensibles
+.syncdir.conf
+*.conf
+
+# Configuration rclone (contient les mots de passe obscurcis)
+.config/rclone/
+
+# Clés SSH
+.ssh/
+id_rsa
+id_rsa.pub
+*.pem
+*.key
+
+# Cache rclone
+.cache/rclone/
+
+# Logs
+*.log
+.local/log/
+
+# Fichiers de verrous et état
+/tmp/syncDir_locks/
+*.lock
+*.state
+
+# Backups
+*.bak
+*.backup
+*~
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Fichiers temporaires
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# Variables d'environnement
+.env
+.env.local
