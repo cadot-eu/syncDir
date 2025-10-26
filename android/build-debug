@@ -1,0 +1,14 @@
+#!/bin/bash
+
+set -e
+
+cd "$(dirname "$0")"
+
+echo "=== Build Debug APK ==="
+./gradlew assembleDebug
+
+echo ""
+echo "✅ APK créé: app/build/outputs/apk/debug/app-debug.apk"
+echo ""
+echo "Pour installer sur téléphone:"
+echo "  adb install -r app/build/outputs/apk/debug/app-debug.apk"

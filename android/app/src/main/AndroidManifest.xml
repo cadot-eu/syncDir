@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" 
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <application
+        android:name=".SyncDirApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SyncDir"
+        android:usesCleartextTraffic="true"
+        tools:targetApi="31">
+
+        <!-- Main Activity - Liste des serveurs -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            
+            <!-- Intent filter pour ouvrir les fichiers .syn -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.syn" />
+                <data android:pathPattern=".*\\.SYN" />
+            </intent-filter>
+            
+            <!-- Intent filter pour content:// (WhatsApp, Email, etc) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- Add/Edit Server Activity -->
+        <activity
+            android:name=".ui.AddServerActivity"
+            android:label="@string/add_server"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!-- User List Activity -->
+        <activity
+            android:name=".ui.UserListActivity"
+            android:label="Utilisateurs"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!-- Add/Edit User Activity -->
+        <activity
+            android:name=".ui.AddUserActivity"
+            android:label="@string/add_user"
+            android:parentActivityName=".ui.UserListActivity" />
+
+        <!-- File Browser Activity -->
+        <activity
+            android:name=".ui.FileBrowserActivity"
+            android:label="@string/file_browser"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!-- File Viewer Activity -->
+        <activity
+            android:name=".ui.FileViewerActivity"
+            android:label="@string/file_viewer"
+            android:parentActivityName=".ui.FileBrowserActivity" />
+
+        <!-- FileProvider pour partager des fichiers -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

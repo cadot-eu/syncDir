@@ -29,16 +29,26 @@ fi
 echo "✅ Dépôt mis à jour"
 echo ""
 
-# Copier le script dans /usr/local/bin/
+# Copier les scripts dans /usr/local/bin/
 echo "📦 Installation de syncDir dans /usr/local/bin/..."
 sudo cp syncDir /usr/local/bin/
 
 if [ $? -ne 0 ]; then
-    echo "❌ Erreur lors de la copie"
+    echo "❌ Erreur lors de la copie de syncDir"
     exit 1
 fi
 
 echo "✅ syncDir installé avec succès"
+
+echo "📦 Installation de syncDir-share dans /usr/local/bin/..."
+sudo cp syncDir-share /usr/local/bin/
+
+if [ $? -ne 0 ]; then
+    echo "❌ Erreur lors de la copie de syncDir-share"
+    exit 1
+fi
+
+echo "✅ syncDir-share installé avec succès"
 echo ""
 
 # Créer le répertoire de logs s'il n'existe pas

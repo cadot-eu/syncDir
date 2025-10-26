@@ -43,3 +43,20 @@ desktop.ini
 # Variables d'environnement
 .env
 .env.local
+
+# Android
+android/.gradle/
+android/.idea/
+android/local.properties
+android/build/
+android/app/build/
+android/*.iml
+android/.DS_Store
+android/captures/
+android/.externalNativeBuild/
+android/.cxx/
+android/keystore/*.jks
+android/*.apk
+android/*.aab
+android/app-release-aligned.apk
+android/syncdir-release-signed.apk

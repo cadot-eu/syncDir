@@ -1,255 +1,157 @@
-# syncDir - Synchronisation SSH Bidirectionnelle Chiffrée
+# syncDir
 
-Script bash pour synchroniser automatiquement des répertoires locaux avec un serveur distant via SSH, avec chiffrement transparent des données.
+Synchronisation bidirectionnelle chiffrée de répertoires via SSH.
 
-## 🚀 Fonctionnalités
+## Fonctionnalités
 
-- ✅ **Synchronisation bidirectionnelle** rapide avec rclone bisync
-- 🔒 **Chiffrement transparent** des données avant envoi sur le serveur distant
-- 🔄 **Synchronisation incrémentale** - ne transfère que les modifications
-- 🛡️ **Sécurisé** - Authentification par clés SSH, pas de mots de passe en clair
-- ⚡ **Rapide** - Détection intelligente des changements avec cache local
-- 🔧 **Facile** - Configuration interactive au premier lancement
-- 📊 **Logs détaillés** - Suivi complet de toutes les opérations
-- 🔁 **Reprise automatique** - Gestion des synchronisations interrompues
-- 🗂️ **Multi-répertoires** - Synchronisez plusieurs répertoires indépendamment
+- Synchronisation bidirectionnelle rapide (rclone bisync)
+- Chiffrement transparent AES-256 (noms de fichiers inclus)
+- Accès isolé par répertoire avec utilisateurs SSH dédiés
+- Partage sécurisé avec fichiers `.syn` chiffrés
+- Application Android pour accès mobile
 
-## 📋 Prérequis
+## Prérequis
 
-- **Linux** (Ubuntu, Debian, etc.)
-- **Bash** 4.0+
-- **Accès SSH root** au serveur distant (pour la configuration initiale)
-- **rclone** (installé automatiquement par le script si absent)
+- Linux (Ubuntu, Debian, etc.)
+- Accès SSH root au serveur distant
+- rclone (installé automatiquement si absent)
 
-## 📦 Installation
+## Installation
 
 ```bash
-# Cloner le projet
 git clone https://github.com/cadot-eu/syncDir.git
 cd syncDir
-
-# Rendre le script exécutable
-chmod +x syncDir
-
-# Copier dans votre PATH
-sudo cp syncDir /usr/local/bin/
-
-# Créer le répertoire de logs
-mkdir -p ~/syncDir_log
-```
-
-### Mise à jour
-
-Pour mettre à jour syncDir vers la dernière version :
-
-```bash
-cd syncDir
+chmod +x syncDir syncDir-share update
 ./update
 ```
 
-Le script `update` va :
-- Récupérer les dernières modifications depuis GitHub
-- Installer automatiquement dans `/usr/local/bin/`
-- Créer le répertoire `~/syncDir_log` si nécessaire
+Le script `update` installe `syncDir` et `syncDir-share` dans `/usr/local/bin/`.
 
-## ⚙️ Configuration
+## Configuration
 
-Au premier lancement, le script vous demandera :
-
-1. **Adresse IP ou nom d'hôte** du serveur distant
-2. **Utilisateur root** distant (défaut: root)
-3. **Répertoire de base** distant (défaut: /home)
-4. **Mot de passe de chiffrement** pour protéger vos données
-
-La configuration est sauvegardée dans `~/.syncdir.conf` (protégé en chmod 600).
-
-## 🎯 Usage
-
-### Synchronisation simple
+Au premier lancement :
 
 ```bash
-# Synchroniser le répertoire ~/Documents/projet
-./syncDir Documents/projet
-
-# Ou avec un chemin absolu
-./syncDir /home/michael/Documents/projet
+syncDir <nom-repertoire>
 ```
 
-### Modes avancés
+Le script demande :
+1. Adresse IP ou hostname du serveur distant
+2. Utilisateur root distant (défaut: root)
+3. Répertoire de base distant (défaut: /home)
+4. Mot de passe de chiffrement
+
+Configuration sauvegardée dans `~/.syncdir.conf` (chmod 600).
+
+## Usage
+
+### Synchronisation
 
 ```bash
-# Mode MAITRE - Priorité au local en cas de conflit
-./syncDir Documents/projet --maitre
-
-# Mode RESET - Effacer et resynchroniser complètement
-./syncDir Documents/projet --reset
-
-# Mode DELETE DISTANT - Supprimer toutes les données distantes
-./syncDir Documents/projet --deleteDistant
-
-# Ou sans spécifier de répertoire
-./syncDir --deleteDistant
+syncDir <repertoire>           # Synchronisation bidirectionnelle
+syncDir <repertoire> --maitre  # Priorité au local en cas de conflit
+syncDir <repertoire> --reset   # Resynchronisation complète
 ```
 
-### Exemples concrets
+### Partage sécurisé
 
 ```bash
-# Synchroniser votre dossier cloud
-./syncDir cloud
-
-# Synchroniser vos photos
-./syncDir Photos
-
-# Synchroniser un projet spécifique
-./syncDir git/mon-projet
+syncDir-share <repertoire>
 ```
 
-### 👥 Synchronisation multi-utilisateurs
+Crée un fichier `<repertoire>.syn` dans le répertoire courant contenant :
+- Clé SSH dédiée pour ce répertoire
+- Identifiants de connexion (utilisateur SSH isolé)
+- Configuration chiffrée
 
-Pour partager des données entre plusieurs utilisateurs :
+Partager ce fichier via WhatsApp, email, etc. + communiquer le mot de passe séparément.
+
+### Multi-utilisateurs
 
 ```bash
-# Sur l'ordinateur principal (Emeline = maître)
-emeline$ syncDir justificatif_papier --maitre
+# Utilisateur 1 (maître)
+syncDir dossier --maitre
 
-# Sur l'ordinateur de Michael (accès aux données d'Emeline)
-michael$ mkdir ~/justificatif_papier
-michael$ syncDir justificatif_papier --user emeline
+# Utilisateur 2 (accès partagé)
+mkdir ~/dossier
+syncDir dossier --user utilisateur1
 ```
 
-**Important :**
-- Utilisez le même nom de répertoire sur tous les ordinateurs
-- Utilisez la même configuration (serveur distant, mot de passe de chiffrement)
-- L'utilisateur maître aura priorité en cas de conflit
-- L'option `--user` permet d'accéder aux données d'un autre utilisateur
-
-## 🔄 Automatisation avec Cron
-
-Pour synchroniser automatiquement :
+## Automatisation
 
 ```bash
 crontab -e
 ```
 
-Ajoutez :
-
 ```cron
-# Synchronisation toutes les 15 minutes
 */15 * * * * syncDir cloud >> ~/syncDir_log/cron.log 2>&1
-
-# Synchronisation toutes les heures en mode maitre
-0 * * * * syncDir Documents --maitre >> ~/syncDir_log/cron.log 2>&1
 ```
 
-## 🔐 Sécurité
+## Sécurité
 
-### Ce qui est chiffré
-- ✅ Tous les fichiers sont chiffrés avec rclone crypt avant envoi
-- ✅ Les noms de fichiers sont chiffrés
-- ✅ Les noms de répertoires sont chiffrés
-- ✅ Chiffrement AES-256
+### Chiffrement
+- Fichiers : AES-256 (rclone crypt)
+- Noms de fichiers et répertoires : chiffrés
+- Transport : SSH
 
-### Ce qui est stocké localement (NON commité)
-- `~/.syncdir.conf` - Configuration (IP serveur, mots de passe obscurcis)
-- `~/.config/rclone/rclone.conf` - Configuration rclone
-- `~/.ssh/id_rsa` - Clé SSH privée
-- `~/.cache/rclone/bisync/` - Cache de synchronisation
+### Isolation par répertoire
+Chaque répertoire partagé utilise :
+- Un utilisateur SSH dédié (ex: `michaelSync_domo`)
+- Une clé SSH unique
+- Accès limité à ce répertoire uniquement (pas d'accès aux autres répertoires)
 
-**⚠️ Ne JAMAIS commiter ces fichiers !**
+### Fichiers locaux sensibles
+- `~/.syncdir.conf` - Configuration
+- `~/.config/rclone/rclone.conf` - Config rclone
+- `~/.ssh/syncdir/` - Clés SSH par répertoire
+- `~/.cache/rclone/bisync/` - Cache
 
-## 📁 Structure du projet
+**Ne jamais commiter ces fichiers.**
 
-```
-syncDir/
-├── syncDir              # Script principal
-├── README.md           # Documentation
-├── LICENSE             # Licence
-├── .gitignore          # Fichiers à ignorer
-└── examples/           # Exemples de configuration
-```
+## Application Android
 
-## 🐛 Dépannage
+L'app Android permet :
+- Import de fichiers `.syn` (ajout automatique du répertoire partagé)
+- Navigation dans les fichiers distants
+- Téléchargement de fichiers
+- Gestion de plusieurs répertoires partagés
 
-### La synchronisation est lente
+### Installation
 
-Le script utilise rclone bisync qui est très rapide. Si c'est lent :
-- Première synchro = initialisation (normal)
-- Synchros suivantes = quelques secondes
+Télécharger l'APK depuis `android/releases/syncdir-v1.0.0.apk` et installer sur votre téléphone.
 
-### Erreur "unknown flag"
-
-Votre version de rclone est trop ancienne. Le script met automatiquement à jour rclone vers la dernière version.
-
-### Erreur de connexion SSH
+### Développement
 
 ```bash
-# Vérifier la connexion
-ssh root@votre-serveur
+cd android
 
-# Régénérer les clés si nécessaire
-rm ~/.ssh/id_rsa*
-./syncDir cloud
+# Build debug
+./build-debug
+
+# Build production
+./build-prod
 ```
 
-### Réinitialiser complètement
+Code source : `android/`
+
+## Dépannage
+
+### Réinitialiser
 
 ```bash
-# Supprimer la configuration locale
 rm ~/.syncdir.conf
 rm -rf ~/.config/rclone/
 rm -rf ~/.cache/rclone/bisync/
-
-# Supprimer les données distantes
-./syncDir --deleteDistant
-
-# Recommencer
-./syncDir cloud
+syncDir --deleteDistant
 ```
 
-## 📊 Logs
-
-Les logs sont stockés dans `~/.local/log/syncDir/syncDir.log`
+## Logs
 
 ```bash
-# Voir les logs en temps réel
 tail -f ~/.local/log/syncDir/syncDir.log
-
-# Rechercher les erreurs
 grep ERROR ~/.local/log/syncDir/syncDir.log
-
-# Logs d'un répertoire spécifique
-grep "cloud" ~/.local/log/syncDir/syncDir.log
 ```
 
-## 🤝 Contribution
+## Licence
 
-Les contributions sont les bienvenues !
-
-1. Fork le projet
-2. Créez une branche (`git checkout -b feature/amelioration`)
-3. Committez vos changements (`git commit -am 'Ajout fonctionnalité'`)
-4. Push vers la branche (`git push origin feature/amelioration`)
-5. Ouvrez une Pull Request
-
-## 📄 Licence
-
-MIT License - voir le fichier [LICENSE](LICENSE)
-
-## 👤 Auteur
-
-**Michael**
-
-## 🙏 Remerciements
-
-- [rclone](https://rclone.org/) - Outil de synchronisation cloud
-- Communauté open source
-
-## 📝 Notes de version
-
-### v1.0.0 (2025-10-25)
-- ✨ Synchronisation bidirectionnelle avec rclone bisync
-- 🔒 Chiffrement transparent des données
-- ⚡ Optimisations de performance
-- 🛠️ Mise à jour automatique de rclone
-- 📖 Documentation complète
-# syncDir
+MIT License - voir [LICENSE](LICENSE)

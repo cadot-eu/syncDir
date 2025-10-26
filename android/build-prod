@@ -1,0 +1,43 @@
+#!/bin/bash
+
+set -e
+
+cd "$(dirname "$0")"
+
+KEYSTORE="keystore/syncdir-release-new.jks"
+KEYSTORE_PASS="syncdir2024"
+VERSION="1.0.0"
+
+echo "=== Build Production APK ==="
+echo ""
+
+# Build release
+echo "📦 Compilation..."
+./gradlew assembleRelease
+
+# Align
+echo "🔧 Alignement..."
+zipalign -v -p 4 app/build/outputs/apk/release/app-release-unsigned.apk app-release-aligned.apk
+
+# Sign
+echo "✍️  Signature..."
+apksigner sign --ks "$KEYSTORE" --ks-pass pass:"$KEYSTORE_PASS" --out syncdir-release-signed.apk app-release-aligned.apk
+
+# Verify
+echo "✅ Vérification..."
+apksigner verify syncdir-release-signed.apk
+
+# Copy to releases
+echo "📁 Copie vers releases..."
+mkdir -p releases
+cp syncdir-release-signed.apk releases/syncdir-v${VERSION}.apk
+
+# Cleanup
+rm app-release-aligned.apk
+
+echo ""
+echo "✅ APK de production créé: releases/syncdir-v${VERSION}.apk"
+echo ""
+echo "Pour installer sur téléphone:"
+echo "  adb uninstall com.syncdir.android"
+echo "  adb install releases/syncdir-v${VERSION}.apk"

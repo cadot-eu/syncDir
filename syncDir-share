@@ -1,0 +1,140 @@
+#!/bin/bash
+
+#############################################
+# syncDir-share - Créer un partage sécurisé pour un répertoire
+# Génère un utilisateur SSH dédié et un fichier de partage
+#############################################
+
+set -e
+
+LOCAL_USER=$(whoami)
+CONFIG_FILE="$HOME/.syncdir.conf"
+if [ -t 1 ]; then
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    RED='\033[0;31m'
+    NC='\033[0m'
+else
+    GREEN=''; YELLOW=''; RED=''; NC=''
+fi
+
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+
+show_help() {
+    cat << 'HELP'
+syncDir-share - Créer un partage sécurisé pour un répertoire
+=============================================================
+
+USAGE:
+    syncDir-share <repertoire>
+    syncDir-share --help
+
+DESCRIPTION:
+    Crée un accès sécurisé isolé pour un répertoire spécifique :
+    - Génère un utilisateur SSH dédié (ex: michaelSync_domo)
+    - Crée une paire de clés SSH unique pour ce répertoire
+    - Génère un fichier .syncdir-share à partager
+    - L'accès est limité à CE répertoire uniquement
+
+EXEMPLES:
+    syncDir-share domo
+    syncDir-share justificatif_papier
+
+Le fichier généré peut être partagé via WhatsApp, email, etc.
+HELP
+}
+
+if [ "$1" == "--help" ] || [ "$1" == "-h" ] || [ $# -lt 1 ]; then
+    show_help
+    exit 0
+fi
+
+DIR_NAME="$1"
+LOCAL_DIR="$HOME/${DIR_NAME}"
+
+if [ ! -d "$LOCAL_DIR" ]; then
+    log_error "Répertoire inexistant: $LOCAL_DIR"
+    exit 1
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    log_error "Configuration syncDir introuvable. Lancez d'abord: syncDir $DIR_NAME"
+    exit 1
+fi
+
+source "$CONFIG_FILE"
+
+log_info "=========================================="
+log_info "  Création partage sécurisé: $DIR_NAME"
+log_info "=========================================="
+echo ""
+
+# L'utilisateur dédié pour ce répertoire (créé par syncDir)
+SHARE_USER="${LOCAL_USER}Sync_${DIR_NAME//\//_}"
+SHARE_KEY="$HOME/.ssh/syncdir/id_rsa_${DIR_NAME//\//_}"
+SHARE_FILE="${DIR_NAME//\//_}.syn"
+if [ ! -f "$SHARE_KEY" ]; then
+    log_error "Clé SSH introuvable: $SHARE_KEY"
+    log_error "Vous devez d'abord synchroniser avec: syncDir ${DIR_NAME}"
+    exit 1
+fi
+log_info "✓ Clé SSH trouvée: $SHARE_KEY"
+
+# Vérifier que l'utilisateur distant existe (créé par syncDir)
+log_info "Vérification de l'utilisateur distant..."
+if ! ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "id ${SHARE_USER} &>/dev/null"; then
+    log_error "L'utilisateur ${SHARE_USER} n'existe pas sur le serveur"
+    log_error "Vous devez d'abord synchroniser avec: syncDir ${DIR_NAME}"
+    exit 1
+fi
+log_info "✓ Utilisateur ${SHARE_USER} trouvé sur le serveur"
+
+# Demander mot de passe de partage
+echo ""
+read -sp "Mot de passe de partage (pour chiffrer le fichier): " SHARE_PASSWORD
+echo ""
+
+if [ -z "$SHARE_PASSWORD" ]; then
+    log_error "Mot de passe requis"
+    exit 1
+fi
+
+# Créer fichier de partage JSON
+log_info "Génération fichier de partage..."
+
+JSON_CONTENT=$(jq -n \
+  --arg version "3.0-share-encrypted" \
+  --arg created "$(date -Iseconds)" \
+  --arg hostname "$REMOTE_HOST" \
+  --arg port "22" \
+  --arg ssh_key "$(cat "$SHARE_KEY")" \
+  --arg username "$SHARE_USER" \
+  --arg directory "$DIR_NAME" \
+  --arg password "$CRYPT_PASSWORD" \
+  --arg shared_by "$LOCAL_USER" \
+  --arg share_name "${LOCAL_USER} - ${DIR_NAME}" \
+  '{
+    version: $version,
+    share_type: "single_directory",
+    created_at: $created,
+    shared_by: $shared_by,
+    share_name: $share_name,
+    hostname: $hostname,
+    port: ($port | tonumber),
+    ssh_key: $ssh_key,
+    username: $username,
+    remote_directory: $directory,
+    password: $password
+  }')
+
+# Chiffrer avec OpenSSL AES-256-CBC
+log_info "Chiffrement du fichier..."
+echo "$JSON_CONTENT" | openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$SHARE_PASSWORD" | base64 -w 0 > "$SHARE_FILE"
+
+echo ""
+log_info "✅ Partage créé: $(pwd)/$SHARE_FILE"
+log_warn "⚠️  Communiquer le mot de passe séparément!"
+echo ""
+

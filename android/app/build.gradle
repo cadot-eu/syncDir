@@ -1,0 +1,86 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.syncdir.android"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.syncdir.android"
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            shrinkResources false
+        }
+    }
+    
+    aaptOptions {
+        noCompress ""
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+    
+    packagingOptions {
+        resources {
+            excludes += ["META-INF/LICENSE", "META-INF/NOTICE"]
+        }
+    }
+}
+
+dependencies {
+    // AndroidX Core
+    implementation "androidx.appcompat:appcompat:1.6.1"
+    implementation "com.google.android.material:material:1.11.0"
+    implementation "androidx.constraintlayout:constraintlayout:2.1.4"
+    implementation "androidx.recyclerview:recyclerview:1.3.2"
+    implementation "androidx.cardview:cardview:1.0.0"
+    implementation "androidx.swiperefreshlayout:swiperefreshlayout:1.1.0"
+
+    // Room Database
+    implementation "androidx.room:room-runtime:2.6.1"
+    annotationProcessor "androidx.room:room-compiler:2.6.1"
+
+    // Security
+    implementation "androidx.security:security-crypto:1.1.0-alpha06"
+
+    // Crypto - BouncyCastle complet pour EdDSA
+    implementation "org.bouncycastle:bcprov-jdk18on:1.75"
+    implementation "org.bouncycastle:bcpkix-jdk18on:1.75"
+    
+    // SSH/SFTP - SSHJ
+    implementation("com.hierynomus:sshj:0.38.0") {
+        exclude group: "org.bouncycastle"
+    }
+    implementation "org.slf4j:slf4j-android:1.7.36"
+    
+    // Support EdDSA
+    implementation "net.i2p.crypto:eddsa:0.3.0"
+
+    // Lifecycle
+    implementation "androidx.lifecycle:lifecycle-runtime:2.7.0"
+    implementation "androidx.lifecycle:lifecycle-viewmodel:2.7.0"
+
+    // Work Manager
+    implementation "androidx.work:work-runtime:2.9.0"
+
+    // Testing
+    testImplementation "junit:junit:4.13.2"
+    androidTestImplementation "androidx.test.ext:junit:1.1.5"
+    androidTestImplementation "androidx.test.espresso:espresso-core:3.5.1"
+}

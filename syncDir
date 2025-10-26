@@ -59,6 +59,7 @@ OPTIONS:
     --reset         Efface distant et resynchronise
     --deleteDistant Supprime TOUT (utilisateur + données)
     --user <nom>    Synchronise avec autre utilisateur (ex: emeline)
+    --password <pw> Mot de passe de chiffrement personnalisé
 
 EXEMPLES:
     syncDir domo
@@ -66,6 +67,7 @@ EXEMPLES:
     syncDir domo --reset
     syncDir --deleteDistant
     syncDir Documents --user emeline
+    syncDir justificatifs --user emeline --password Hy6g86EIwqVvSv
 
 HELP
 }
@@ -79,6 +81,7 @@ IS_MASTER=false
 IS_RESET=false
 IS_DELETE_DISTANT=false
 SYNC_AS_USER=""
+CUSTOM_PASSWORD=""
 DIR_NAME=""
 
 if [ "$1" == "--deleteDistant" ]; then
@@ -97,6 +100,7 @@ else
             reset|--reset) IS_RESET=true; shift ;;
             deleteDistant|--deleteDistant) IS_DELETE_DISTANT=true; shift ;;
             --user) SYNC_AS_USER="$2"; shift 2 ;;
+            --password) CUSTOM_PASSWORD="$2"; shift 2 ;;
             *) log_error "Option invalide: $1"; exit 1 ;;
         esac
     done
@@ -137,6 +141,12 @@ fi
 
 source "$CONFIG_FILE"
 
+# Utiliser mot de passe personnalisé si fourni
+if [ -n "$CUSTOM_PASSWORD" ]; then
+    CRYPT_PASSWORD="$CUSTOM_PASSWORD"
+    log_info "Utilisation mot de passe personnalisé"
+fi
+
 if [ "$DIR_NAME" = "__all__" ]; then
     LOCAL_DIR=""
     DIR_NAME_SAFE="__deleteall__"
@@ -146,12 +156,21 @@ else
     DIR_NAME_SAFE="${DIR_NAME//\//_}"
     LOCK_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.lock"
     if [ ! -d "$LOCAL_DIR" ]; then
-        log_error "Répertoire inexistant: $LOCAL_DIR"
-        exit 1
+        log_info "Création du répertoire local: $LOCAL_DIR"
+        mkdir -p "$LOCAL_DIR"
+        if [ $? -ne 0 ]; then
+            log_error "Impossible de créer le répertoire: $LOCAL_DIR"
+            exit 1
+        fi
     fi
 fi
 
-REMOTE_USER="${SYNC_AS_USER:-${LOCAL_USER}}Sync"
+# Utilisateur dédié par répertoire
+if [ -n "$SYNC_AS_USER" ]; then
+    REMOTE_USER="${SYNC_AS_USER}Sync_${DIR_NAME//\//_}"
+else
+    REMOTE_USER="${LOCAL_USER}Sync_${DIR_NAME//\//_}"
+fi
 
 if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "${REMOTE_ROOT}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
     log_error "Connexion serveur impossible"
@@ -170,30 +189,36 @@ fi
 echo $$ > "$LOCK_FILE"
 trap "rm -f $LOCK_FILE" EXIT
 
-if [ ! -f "${LOCAL_BASE}/.ssh/id_rsa" ]; then
-    log_info "Génération clé SSH..."
-    ssh-keygen -t rsa -b 4096 -f "${LOCAL_BASE}/.ssh/id_rsa" -N "" -C "${LOCAL_USER}@syncDir"
+# Clé SSH dédiée par répertoire
+SSH_KEY_DIR="${LOCAL_BASE}/.ssh/syncdir"
+SSH_KEY_FILE="${SSH_KEY_DIR}/id_rsa_${DIR_NAME//\//_}"
+
+mkdir -p "$SSH_KEY_DIR"
+
+if [ ! -f "$SSH_KEY_FILE" ]; then
+    log_info "Génération clé SSH dédiée pour ${DIR_NAME}..."
+    ssh-keygen -t rsa -b 4096 -f "$SSH_KEY_FILE" -N "" -C "${LOCAL_USER}@${DIR_NAME}"
 fi
 
 if ! ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "id ${REMOTE_USER} &>/dev/null"; then
     log_info "Création ${REMOTE_USER}..."
     ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFREMOTE
 sudo useradd -m -s /bin/bash ${REMOTE_USER}
-sudo mkdir -p /home/${REMOTE_USER}/.ssh /home/${REMOTE_USER}/encrypted
+sudo mkdir -p /home/${REMOTE_USER}/.ssh
 sudo chmod 700 /home/${REMOTE_USER}/.ssh
 sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}
 EOFREMOTE
     [ $? -eq 0 ] && log_info "Utilisateur ${REMOTE_USER} créé"
 fi
 
-if [ -f "${LOCAL_BASE}/.ssh/id_rsa.pub" ]; then
-    ssh_key_content=$(cat "${LOCAL_BASE}/.ssh/id_rsa.pub")
+if [ -f "${SSH_KEY_FILE}.pub" ]; then
+    ssh_key_content=$(cat "${SSH_KEY_FILE}.pub")
     key_exists=$(ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
         "sudo grep -F '${ssh_key_content}' /home/${REMOTE_USER}/.ssh/authorized_keys 2>/dev/null || echo ''")
     
     if [ -z "$key_exists" ]; then
         log_info "Installation clé SSH pour ${REMOTE_USER}..."
-        cat "${LOCAL_BASE}/.ssh/id_rsa.pub" | ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+        cat "${SSH_KEY_FILE}.pub" | ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
             "sudo mkdir -p /home/${REMOTE_USER}/.ssh && \
              sudo tee -a /home/${REMOTE_USER}/.ssh/authorized_keys > /dev/null && \
              sudo chmod 700 /home/${REMOTE_USER}/.ssh && \
@@ -206,54 +231,82 @@ if [ -f "${LOCAL_BASE}/.ssh/id_rsa.pub" ]; then
 fi
 
 if [ "$IS_DELETE_DISTANT" = true ]; then
-    log_warn "========================================"
-    log_warn "ATTENTION: Suppression de TOUTES les données distantes!"
-    log_warn "Utilisateur: ${REMOTE_USER}"
-    log_warn "Répertoire: /home/${REMOTE_USER}/"
-    log_warn "========================================"
-    echo ""
-    read -p "Confirmez la suppression complète (tapez 'OUI' en majuscules): " confirmation
-    
-    if [ "$confirmation" != "OUI" ]; then
-        log_info "Suppression annulée"
-        exit 0
-    fi
-    
-    log_warn "Suppression en cours..."
-    
-    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFDELETE
+    if [ "$DIR_NAME" = "__all__" ]; then
+        # Supprimer TOUS les utilisateurs ${LOCAL_USER}Sync_*
+        log_warn "========================================"
+        log_warn "ATTENTION: Suppression de TOUS les utilisateurs!"
+        log_warn "Tous les utilisateurs (${LOCAL_USER}Sync_*)"
+        log_warn "========================================"
+        echo ""
+        read -p "Confirmez la suppression complète (tapez 'OUI' en majuscules): " confirmation
+        
+        if [ "$confirmation" != "OUI" ]; then
+            log_info "Suppression annulée"
+            exit 0
+        fi
+        
+        log_warn "Suppression en cours..."
+        
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFDELETE
+set -e
+LOCAL_USER="${LOCAL_USER}"
+
+echo "Recherche des utilisateurs (\${LOCAL_USER}Sync_*)..."
+for share_user in \$(getent passwd | grep "^\${LOCAL_USER}Sync_" | cut -d: -f1); do
+    echo "Suppression utilisateur: \$share_user"
+    sudo userdel -r "\$share_user" 2>/dev/null || true
+    sudo rm -rf "/home/\$share_user" 2>/dev/null || true
+done
+
+echo "Suppression terminée"
+EOFDELETE
+        
+        log_info "Tous les utilisateurs (${LOCAL_USER}Sync_*) ont été supprimés"
+        log_info "Opération terminée avec succès"
+    else
+        # Supprimer un utilisateur spécifique
+        log_warn "========================================"
+        log_warn "ATTENTION: Suppression de l'utilisateur!"
+        log_warn "Utilisateur: ${REMOTE_USER}"
+        log_warn "Répertoire: /home/${REMOTE_USER}/"
+        log_warn "========================================"
+        echo ""
+        read -p "Confirmez la suppression (tapez 'OUI' en majuscules): " confirmation
+        
+        if [ "$confirmation" != "OUI" ]; then
+            log_info "Suppression annulée"
+            exit 0
+        fi
+        
+        log_warn "Suppression en cours..."
+        
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFDELETE
 set -e
 REMOTE_USER="${REMOTE_USER}"
 
-echo "Suppression complète de l'utilisateur \${REMOTE_USER} et son répertoire home..."
-
 if id "\${REMOTE_USER}" &>/dev/null; then
     sudo userdel -r "\${REMOTE_USER}" 2>/dev/null || true
+    sudo rm -rf "/home/\${REMOTE_USER}" 2>/dev/null || true
     echo "Utilisateur \${REMOTE_USER} supprimé"
 else
     echo "Utilisateur \${REMOTE_USER} n'existe pas"
 fi
-
-if [ -d "/home/\${REMOTE_USER}" ]; then
-    sudo rm -rf "/home/\${REMOTE_USER}"
-    echo "Répertoire /home/\${REMOTE_USER} supprimé"
-fi
-
-echo "Suppression terminée"
 EOFDELETE
-    
-    log_info "L'utilisateur distant ${REMOTE_USER} et son répertoire home ont été complètement supprimés"
-    log_info "Répertoire /home/${REMOTE_USER}/ n'existe plus"
-    log_info "Opération terminée avec succès"
+        
+        log_info "L'utilisateur ${REMOTE_USER} a été supprimé"
+        log_info "Opération terminée avec succès"
+    fi
     exit 0
 fi
 
-remote_encrypted="/home/${REMOTE_USER}/encrypted/${DIR_NAME}"
+# Le répertoire distant est directement dans le home de l'utilisateur dédié
+remote_encrypted="/home/${REMOTE_USER}/${DIR_NAME}"
 local_encrypted="${LOCAL_DIR}/.encrypted_cache"
 
 mkdir -p "$local_encrypted"
 
-ssh "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p ${remote_encrypted}" 2>/dev/null || \
+# Créer le répertoire distant avec la clé dédiée
+ssh -i "$SSH_KEY_FILE" "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p ${remote_encrypted}" 2>/dev/null || \
     ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo mkdir -p ${remote_encrypted} && sudo chown -R ${REMOTE_USER}:${REMOTE_USER} ${remote_encrypted}"
 
 if [ "$IS_RESET" = true ]; then
@@ -280,7 +333,7 @@ if [ "$IS_MASTER" = true ]; then
     done
     
     log_info "[2/2] Upload..."
-    rsync -avz --delete -e "ssh" "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
+    rsync -avz --delete -e "ssh -i ${SSH_KEY_FILE}" "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
     
 else
     log_info "Mode BIDIRECTIONNEL"
@@ -298,7 +351,7 @@ else
     done
     
     log_info "[2/4] Download..."
-    rsync -avz -e "ssh" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/" "${local_encrypted}/"
+    rsync -avz -e "ssh -i ${SSH_KEY_FILE}" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/" "${local_encrypted}/"
     
     log_info "[3/4] Déchiffrement..."
     find "$local_encrypted" -type f -name "*.enc" | while read -r encrypted_file; do
@@ -314,7 +367,7 @@ else
     done
     
     log_info "[4/4] Upload..."
-    rsync -avz -e "ssh" "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
+    rsync -avz -e "ssh -i ${SSH_KEY_FILE}" "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
 fi
 
 ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo chown -R ${REMOTE_USER}:${REMOTE_USER} ${remote_encrypted}" 2>/dev/null
