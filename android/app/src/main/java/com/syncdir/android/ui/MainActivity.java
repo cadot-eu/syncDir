@@ -90,6 +90,9 @@ public class MainActivity extends AppCompatActivity {
         if (item.getItemId() == R.id.action_update) {
             checkForUpdate();
             return true;
+        } else if (item.getItemId() == R.id.action_share_apk) {
+            shareApk();
+            return true;
         }
         return super.onOptionsItemSelected(item);
     }
@@ -457,6 +460,28 @@ public class MainActivity extends AppCompatActivity {
                 getSharedPreferences("temp", MODE_PRIVATE).edit().remove("pending_apk").apply();
                 installApk(new File(apkPath));
             }
+        }
+    }
+    
+    private void shareApk() {
+        try {
+            android.content.pm.ApplicationInfo app = getApplicationContext().getApplicationInfo();
+            String apkPath = app.sourceDir;
+            File apkFile = new File(apkPath);
+            
+            Uri apkUri = FileProvider.getUriForFile(this, 
+                getPackageName() + ".fileprovider", apkFile);
+            
+            Intent shareIntent = new Intent(Intent.ACTION_SEND);
+            shareIntent.setType("application/vnd.android.package-archive");
+            shareIntent.putExtra(Intent.EXTRA_STREAM, apkUri);
+            shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Application SyncDir");
+            shareIntent.putExtra(Intent.EXTRA_TEXT, "Voici l'application SyncDir pour synchroniser vos fichiers.");
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            
+            startActivity(Intent.createChooser(shareIntent, "Partager l'appli SyncDir"));
+        } catch (Exception e) {
+            Toast.makeText(this, "Erreur de partage: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 }

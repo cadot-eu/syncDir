@@ -6,4 +6,9 @@
         android:title="Mettre à jour"
         android:icon="@android:drawable/stat_sys_download"
         app:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_share_apk"
+        android:title="Partager l'appli"
+        android:icon="@android:drawable/ic_menu_share"
+        app:showAsAction="never" />
 </menu>
