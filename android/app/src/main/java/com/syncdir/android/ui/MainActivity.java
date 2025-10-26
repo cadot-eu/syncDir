@@ -107,25 +107,37 @@ public class MainActivity extends AppCompatActivity {
         String action = intent.getAction();
         Uri uri = null;
         
+        Log.d("MainActivity", "handleIncomingIntent - Action: " + action);
+        
         // Gérer ACTION_VIEW (click sur fichier)
         if (Intent.ACTION_VIEW.equals(action)) {
             uri = intent.getData();
+            Log.d("MainActivity", "ACTION_VIEW - URI: " + uri);
         }
         // Gérer ACTION_SEND (partage depuis une app)
         else if (Intent.ACTION_SEND.equals(action)) {
             uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            Log.d("MainActivity", "ACTION_SEND - URI: " + uri);
         }
         
         if (uri != null) {
             String path = uri.getPath();
-            // Accepter les fichiers .syn ou tout fichier venant de content://
+            String scheme = uri.getScheme();
+            Log.d("MainActivity", "URI scheme: " + scheme + ", path: " + path);
+            
+            // Accepter les fichiers .syn
             if (path != null && (path.endsWith(".syn") || path.endsWith(".SYN") || path.endsWith(".syncdir-share"))) {
+                Log.d("MainActivity", "Fichier .syn détecté par path");
                 importConfigFromUri(uri);
-            } else if ("content".equals(uri.getScheme())) {
+            } else if ("content".equals(scheme)) {
                 // Pour les fichiers venant de WhatsApp/Email, essayer de détecter le nom
                 String fileName = getFileNameFromUri(uri);
+                Log.d("MainActivity", "Content URI - fileName: " + fileName);
                 if (fileName != null && (fileName.endsWith(".syn") || fileName.endsWith(".SYN"))) {
+                    Log.d("MainActivity", "Fichier .syn détecté par fileName");
                     importConfigFromUri(uri);
+                } else {
+                    Log.d("MainActivity", "Pas un fichier .syn, ignoré");
                 }
             }
         }
@@ -396,6 +408,29 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void installApk(File apkFile) {
+        // Vérifier la permission d'installer des applications (Android 8+)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                // Demander la permission
+                new androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("Permission requise")
+                    .setMessage("L'application a besoin de la permission pour installer des APK.")
+                    .setPositiveButton("Autoriser", (dialog, which) -> {
+                        Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+                        intent.setData(Uri.parse("package:" + getPackageName()));
+                        startActivityForResult(intent, 1234);
+                        // Sauvegarder le fichier APK pour l'installer après
+                        getSharedPreferences("temp", MODE_PRIVATE)
+                            .edit()
+                            .putString("pending_apk", apkFile.getAbsolutePath())
+                            .apply();
+                    })
+                    .setNegativeButton("Annuler", null)
+                    .show();
+                return;
+            }
+        }
+        
         try {
             Uri apkUri = FileProvider.getUriForFile(this, 
                 getPackageName() + ".fileprovider", apkFile);
@@ -408,6 +443,20 @@ public class MainActivity extends AppCompatActivity {
             startActivity(intent);
         } catch (Exception e) {
             Toast.makeText(this, "Erreur d'installation: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+    
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 1234) {
+            // Récupérer le fichier APK en attente
+            String apkPath = getSharedPreferences("temp", MODE_PRIVATE)
+                .getString("pending_apk", null);
+            if (apkPath != null) {
+                getSharedPreferences("temp", MODE_PRIVATE).edit().remove("pending_apk").apply();
+                installApk(new File(apkPath));
+            }
         }
     }
 }
