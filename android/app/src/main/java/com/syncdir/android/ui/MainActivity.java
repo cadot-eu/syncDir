@@ -464,24 +464,64 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void shareApk() {
-        try {
-            android.content.pm.ApplicationInfo app = getApplicationContext().getApplicationInfo();
-            String apkPath = app.sourceDir;
-            File apkFile = new File(apkPath);
+        new AsyncTask<Void, Void, File>() {
+            @Override
+            protected File doInBackground(Void... voids) {
+                try {
+                    // Obtenir le chemin de l'APK installé
+                    android.content.pm.ApplicationInfo app = getApplicationContext().getApplicationInfo();
+                    String apkPath = app.sourceDir;
+                    
+                    // Copier l'APK dans le cache
+                    File sourceFile = new File(apkPath);
+                    File cacheDir = new File(getCacheDir(), "share");
+                    if (!cacheDir.exists()) cacheDir.mkdirs();
+                    
+                    File destFile = new File(cacheDir, "SyncDir.apk");
+                    
+                    // Copier le fichier
+                    java.io.FileInputStream fis = new java.io.FileInputStream(sourceFile);
+                    FileOutputStream fos = new FileOutputStream(destFile);
+                    
+                    byte[] buffer = new byte[4096];
+                    int length;
+                    while ((length = fis.read(buffer)) > 0) {
+                        fos.write(buffer, 0, length);
+                    }
+                    
+                    fos.flush();
+                    fos.close();
+                    fis.close();
+                    
+                    return destFile;
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    return null;
+                }
+            }
             
-            Uri apkUri = FileProvider.getUriForFile(this, 
-                getPackageName() + ".fileprovider", apkFile);
-            
-            Intent shareIntent = new Intent(Intent.ACTION_SEND);
-            shareIntent.setType("application/vnd.android.package-archive");
-            shareIntent.putExtra(Intent.EXTRA_STREAM, apkUri);
-            shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Application SyncDir");
-            shareIntent.putExtra(Intent.EXTRA_TEXT, "Voici l'application SyncDir pour synchroniser vos fichiers.");
-            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            
-            startActivity(Intent.createChooser(shareIntent, "Partager l'appli SyncDir"));
-        } catch (Exception e) {
-            Toast.makeText(this, "Erreur de partage: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-        }
+            @Override
+            protected void onPostExecute(File apkFile) {
+                if (apkFile != null && apkFile.exists()) {
+                    try {
+                        Uri apkUri = FileProvider.getUriForFile(MainActivity.this, 
+                            getPackageName() + ".fileprovider", apkFile);
+                        
+                        Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                        shareIntent.setType("application/vnd.android.package-archive");
+                        shareIntent.putExtra(Intent.EXTRA_STREAM, apkUri);
+                        shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Application SyncDir");
+                        shareIntent.putExtra(Intent.EXTRA_TEXT, "Voici l'application SyncDir pour synchroniser vos fichiers.");
+                        shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        
+                        startActivity(Intent.createChooser(shareIntent, "Partager l'appli SyncDir"));
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "Erreur de partage: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
+                } else {
+                    Toast.makeText(MainActivity.this, "Erreur de copie de l'APK", Toast.LENGTH_SHORT).show();
+                }
+            }
+        }.execute();
     }
 }
