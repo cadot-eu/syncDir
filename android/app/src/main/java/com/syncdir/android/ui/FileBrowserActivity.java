@@ -30,11 +30,14 @@ import com.syncdir.android.network.RemoteFile;
 import com.syncdir.android.network.SshManager_age;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Stack;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 public class FileBrowserActivity extends AppCompatActivity {
 
@@ -87,13 +90,22 @@ public class FileBrowserActivity extends AppCompatActivity {
         sshManager = new SshManager_age(directory);
 
         // Adapter
-        fileAdapter = new FileAdapter(file -> {
-            if (file.isDirectory()) {
-                // Ouvrir le dossier
-                navigateToDirectory(file.getPath());
-            } else {
-                // Télécharger et ouvrir le fichier
-                downloadAndOpenFile(file);
+        fileAdapter = new FileAdapter(new FileAdapter.OnFileClickListener() {
+            @Override
+            public void onFileClick(RemoteFile file) {
+                if (file.isDirectory()) {
+                    // Ouvrir le dossier
+                    navigateToDirectory(file.getPath());
+                } else {
+                    // Télécharger et ouvrir le fichier
+                    downloadAndOpenFile(file);
+                }
+            }
+            
+            @Override
+            public void onFileLongClick(RemoteFile file) {
+                // Partager le fichier ou dossier
+                shareFileOrDirectory(file);
             }
         });
         recyclerView.setAdapter(fileAdapter);
@@ -272,10 +284,16 @@ public class FileBrowserActivity extends AppCompatActivity {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             
             try {
-                startActivity(Intent.createChooser(intent, "Ouvrir avec"));
+                // Essayer d'ouvrir avec l'app par défaut
+                startActivity(intent);
             } catch (android.content.ActivityNotFoundException e) {
-                Log.e("FileBrowser", "Aucune app trouvée", e);
-                Toast.makeText(this, "Aucune application pour ouvrir ce type de fichier", Toast.LENGTH_LONG).show();
+                // Aucune app par défaut, afficher le chooser
+                try {
+                    startActivity(Intent.createChooser(intent, "Ouvrir avec"));
+                } catch (Exception e2) {
+                    Log.e("FileBrowser", "Aucune app trouvée", e2);
+                    Toast.makeText(this, "Aucune application pour ouvrir ce type de fichier", Toast.LENGTH_LONG).show();
+                }
             }
         } catch (Exception e) {
             Log.e("FileBrowser", "Erreur ouverture fichier", e);
@@ -399,6 +417,129 @@ public class FileBrowserActivity extends AppCompatActivity {
         int lastDot = filename.lastIndexOf('.');
         if (lastDot == -1) return "";
         return filename.substring(lastDot + 1).toLowerCase();
+    }
+    
+    private void shareFileOrDirectory(RemoteFile file) {
+        if (file.isDirectory()) {
+            shareDirectory(file);
+        } else {
+            shareFile(file);
+        }
+    }
+    
+    private void shareFile(RemoteFile file) {
+        showStatus("Préparation du partage...");
+        
+        new AsyncTask<Void, Void, File>() {
+            @Override
+            protected File doInBackground(Void... voids) {
+                try {
+                    // Télécharger le fichier
+                    byte[] data = sshManager.downloadFile(file.getPath());
+                    if (data == null) return null;
+                    
+                    // Sauvegarder dans cache
+                    File cacheDir = new File(getCacheDir(), "share");
+                    if (!cacheDir.exists()) cacheDir.mkdirs();
+                    
+                    File localFile = new File(cacheDir, file.getDecryptedName());
+                    try (FileOutputStream fos = new FileOutputStream(localFile)) {
+                        fos.write(data);
+                    }
+                    
+                    return localFile;
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    return null;
+                }
+            }
+            
+            @Override
+            protected void onPostExecute(File localFile) {
+                hideStatus();
+                
+                if (localFile != null && localFile.exists()) {
+                    shareLocalFile(localFile);
+                } else {
+                    Toast.makeText(FileBrowserActivity.this, 
+                        "Erreur de téléchargement", Toast.LENGTH_SHORT).show();
+                }
+            }
+        }.execute();
+    }
+    
+    private void shareDirectory(RemoteFile directory) {
+        showStatus("Compression du dossier...");
+        
+        new AsyncTask<Void, Void, File>() {
+            @Override
+            protected File doInBackground(Void... voids) {
+                try {
+                    // Lister tous les fichiers du dossier
+                    List<RemoteFile> files = sshManager.listFiles(directory.getPath());
+                    if (files == null || files.isEmpty()) return null;
+                    
+                    // Créer un fichier ZIP
+                    File cacheDir = new File(getCacheDir(), "share");
+                    if (!cacheDir.exists()) cacheDir.mkdirs();
+                    
+                    File zipFile = new File(cacheDir, directory.getDecryptedName() + ".zip");
+                    
+                    try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
+                        for (RemoteFile file : files) {
+                            if (!file.isDirectory()) {
+                                // Télécharger et ajouter au ZIP
+                                byte[] data = sshManager.downloadFile(file.getPath());
+                                if (data != null) {
+                                    ZipEntry entry = new ZipEntry(file.getDecryptedName());
+                                    zos.putNextEntry(entry);
+                                    zos.write(data);
+                                    zos.closeEntry();
+                                }
+                            }
+                        }
+                    }
+                    
+                    return zipFile;
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    return null;
+                }
+            }
+            
+            @Override
+            protected void onPostExecute(File zipFile) {
+                hideStatus();
+                
+                if (zipFile != null && zipFile.exists()) {
+                    shareLocalFile(zipFile);
+                } else {
+                    Toast.makeText(FileBrowserActivity.this, 
+                        "Erreur de compression", Toast.LENGTH_SHORT).show();
+                }
+            }
+        }.execute();
+    }
+    
+    private void shareLocalFile(File file) {
+        try {
+            Uri uri = FileProvider.getUriForFile(this, 
+                getPackageName() + ".fileprovider", file);
+            
+            String mimeType = getMimeType(file.getName());
+            if (mimeType == null || mimeType.isEmpty()) {
+                mimeType = "*/*";
+            }
+            
+            Intent shareIntent = new Intent(Intent.ACTION_SEND);
+            shareIntent.setType(mimeType);
+            shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            
+            startActivity(Intent.createChooser(shareIntent, "Partager via"));
+        } catch (Exception e) {
+            Toast.makeText(this, "Erreur de partage: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
     }
 
     @Override

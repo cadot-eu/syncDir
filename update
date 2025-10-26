@@ -42,6 +42,7 @@ echo "✅ syncDir installé avec succès"
 
 echo "📦 Installation de syncDir-share dans /usr/local/bin/..."
 sudo cp syncDir-share /usr/local/bin/
+sudo chmod +x /usr/local/bin/syncDir-share
 
 if [ $? -ne 0 ]; then
     echo "❌ Erreur lors de la copie de syncDir-share"

@@ -21,6 +21,7 @@ public class FileAdapter extends RecyclerView.Adapter<FileAdapter.FileViewHolder
 
     public interface OnFileClickListener {
         void onFileClick(RemoteFile file);
+        void onFileLongClick(RemoteFile file);
     }
 
     public FileAdapter(OnFileClickListener clickListener) {
@@ -82,6 +83,14 @@ public class FileAdapter extends RecyclerView.Adapter<FileAdapter.FileViewHolder
                 if (clickListener != null) {
                     clickListener.onFileClick(file);
                 }
+            });
+            
+            itemView.setOnLongClickListener(v -> {
+                if (clickListener != null) {
+                    clickListener.onFileLongClick(file);
+                    return true;
+                }
+                return false;
             });
         }
     }

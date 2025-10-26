@@ -2,8 +2,11 @@ package com.syncdir.android.ui;
 
 import android.content.Intent;
 import android.net.Uri;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.widget.Toast;
 
@@ -19,8 +22,11 @@ import com.syncdir.android.utils.ConfigImporter;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.InputStream;
+import java.net.URL;
+import java.net.HttpURLConnection;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
@@ -71,6 +77,21 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         loadDirectories();
+    }
+    
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.main_menu, menu);
+        return true;
+    }
+    
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == R.id.action_update) {
+            checkForUpdate();
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
     }
     
     @Override
@@ -295,6 +316,98 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             Log.e("MainActivity", "Erreur partage", e);
             Toast.makeText(this, "Erreur lors du partage: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+    
+    private void checkForUpdate() {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Mise \u00e0 jour")
+            .setMessage("T\u00e9l\u00e9charger et installer la derni\u00e8re version depuis GitHub ?")
+            .setPositiveButton("Oui", (dialog, which) -> downloadAndInstallUpdate())
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+    
+    private void downloadAndInstallUpdate() {
+        final android.app.ProgressDialog progressDialog = new android.app.ProgressDialog(this);
+        progressDialog.setMessage("T\u00e9l\u00e9chargement de la mise \u00e0 jour...");
+        progressDialog.setProgressStyle(android.app.ProgressDialog.STYLE_HORIZONTAL);
+        progressDialog.setCancelable(false);
+        progressDialog.show();
+        
+        new AsyncTask<Void, Integer, File>() {
+            @Override
+            protected File doInBackground(Void... voids) {
+                try {
+                    // URL du dernier APK sur GitHub
+                    String apkUrl = "https://raw.githubusercontent.com/cadot-eu/syncDir/main/android/releases/syncdir-v1.0.0.apk";
+                    
+                    URL url = new URL(apkUrl);
+                    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                    connection.connect();
+                    
+                    int fileLength = connection.getContentLength();
+                    
+                    // T\u00e9l\u00e9charger dans le cache
+                    File outputFile = new File(getCacheDir(), "syncdir-update.apk");
+                    InputStream input = connection.getInputStream();
+                    FileOutputStream output = new FileOutputStream(outputFile);
+                    
+                    byte[] buffer = new byte[4096];
+                    long total = 0;
+                    int count;
+                    
+                    while ((count = input.read(buffer)) != -1) {
+                        total += count;
+                        if (fileLength > 0) {
+                            publishProgress((int) (total * 100 / fileLength));
+                        }
+                        output.write(buffer, 0, count);
+                    }
+                    
+                    output.flush();
+                    output.close();
+                    input.close();
+                    
+                    return outputFile;
+                } catch (Exception e) {
+                    Log.e("MainActivity", "Erreur t\u00e9l\u00e9chargement", e);
+                    return null;
+                }
+            }
+            
+            @Override
+            protected void onProgressUpdate(Integer... values) {
+                progressDialog.setProgress(values[0]);
+            }
+            
+            @Override
+            protected void onPostExecute(File apkFile) {
+                progressDialog.dismiss();
+                
+                if (apkFile != null && apkFile.exists()) {
+                    installApk(apkFile);
+                } else {
+                    Toast.makeText(MainActivity.this, 
+                        "Erreur de t\u00e9l\u00e9chargement", Toast.LENGTH_LONG).show();
+                }
+            }
+        }.execute();
+    }
+    
+    private void installApk(File apkFile) {
+        try {
+            Uri apkUri = FileProvider.getUriForFile(this, 
+                getPackageName() + ".fileprovider", apkFile);
+            
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "Erreur d'installation: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 }
