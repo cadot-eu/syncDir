@@ -67,7 +67,7 @@ EXEMPLES:
     syncDir domo --reset
     syncDir --deleteDistant
     syncDir Documents --user emeline
-    syncDir justificatifs --user emeline --password Hy6g86EIwqVvSv
+    syncDir justificatifs --user emeline --password **********
 
 HELP
 }
