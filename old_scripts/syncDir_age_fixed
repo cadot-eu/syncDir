@@ -1,0 +1,235 @@
+#!/bin/bash
+
+#############################################
+# syncDir - Script de synchronisation SSH avec chiffrement age
+# Utilise age avec recipient (clé publique) au lieu de passphrase
+#############################################
+
+LOCAL_USER=$(whoami)
+LOCAL_BASE="/home/${LOCAL_USER}"
+CONFIG_FILE="${LOCAL_BASE}/.syncdir_age.conf"
+AGE_KEY_FILE="${LOCAL_BASE}/.config/syncdir/age_key.txt"
+LOCK_DIR="/tmp/syncDir_locks"
+LOG_DIR="${LOCAL_BASE}/.local/log/syncDir"
+
+# Couleurs
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; NC=''
+fi
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+    [ -d "$LOG_DIR" ] && echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir_age.log"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    [ -d "$LOG_DIR" ] && echo "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir_age.log"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+    [ -d "$LOG_DIR" ] && echo "[WARN] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir_age.log"
+}
+
+mkdir -p "$LOCK_DIR" "$LOG_DIR" "$(dirname "$AGE_KEY_FILE")" 2>/dev/null
+
+# Vérifier age
+if ! command -v age &> /dev/null; then
+    log_error "age n'est pas installé"
+    exit 1
+fi
+
+# Aide
+if [ "$1" == "--help" ] || [ "$1" == "-h" ] || [ $# -lt 1 ]; then
+    cat << 'HELP'
+syncDir_age - Synchronisation SSH avec chiffrement age
+
+USAGE: syncDir_age <repertoire> [--maitre|--reset]
+
+EXEMPLES:
+    syncDir_age domo
+    syncDir_age domo --maitre
+HELP
+    exit 0
+fi
+
+DIR_NAME="$1"
+IS_MASTER=false
+IS_RESET=false
+
+shift
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --maitre|maitre) IS_MASTER=true; shift ;;
+        --reset|reset) IS_RESET=true; shift ;;
+        *) log_error "Option invalide: $1"; exit 1 ;;
+    esac
+done
+
+# Configuration
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Configuration initiale"
+    read -p "Adresse serveur distant : " remote_host
+    read -p "Utilisateur root [root] : " remote_root
+    remote_root=${remote_root:-root}
+    
+    cat > "$CONFIG_FILE" <<EOF
+REMOTE_HOST="$remote_host"
+REMOTE_ROOT="$remote_root"
+EOF
+    chmod 600 "$CONFIG_FILE"
+fi
+
+source "$CONFIG_FILE"
+
+# Générer clé age si nécessaire
+if [ ! -f "$AGE_KEY_FILE" ]; then
+    log_info "Génération de la clé age..."
+    age-keygen -o "$AGE_KEY_FILE" 2>/dev/null
+    chmod 600 "$AGE_KEY_FILE"
+    log_info "Clé age générée: $AGE_KEY_FILE"
+fi
+
+# Extraire la clé publique
+AGE_RECIPIENT=$(grep "# public key:" "$AGE_KEY_FILE" | awk '{print $4}')
+
+if [ -z "$AGE_RECIPIENT" ]; then
+    log_error "Impossible d'extraire la clé publique"
+    exit 1
+fi
+
+log_info "Clé publique: $AGE_RECIPIENT"
+
+REMOTE_USER="${LOCAL_USER}Sync"
+LOCAL_DIR="${LOCAL_BASE}/${DIR_NAME}"
+DIR_NAME_SAFE="${DIR_NAME//\//_}"
+LOCK_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.lock"
+
+if [ ! -d "$LOCAL_DIR" ]; then
+    log_error "Répertoire inexistant: $LOCAL_DIR"
+    exit 1
+fi
+
+# Verrou
+if [ -f "$LOCK_FILE" ]; then
+    pid=$(cat "$LOCK_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+        log_warn "Sync déjà en cours (PID: $pid)"
+        exit 0
+    fi
+    rm -f "$LOCK_FILE"
+fi
+
+echo $$ > "$LOCK_FILE"
+trap "rm -f $LOCK_FILE" EXIT
+
+# SSH key
+if [ ! -f "${LOCAL_BASE}/.ssh/id_rsa" ]; then
+    ssh-keygen -t rsa -b 4096 -f "${LOCAL_BASE}/.ssh/id_rsa" -N "" -C "${LOCAL_USER}@syncDir"
+fi
+
+# Créer utilisateur distant
+if ! ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "id ${REMOTE_USER} &>/dev/null"; then
+    log_info "Création utilisateur ${REMOTE_USER}..."
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFREMOTE
+sudo useradd -m -s /bin/bash ${REMOTE_USER}
+sudo mkdir -p /home/${REMOTE_USER}/.ssh /home/${REMOTE_USER}/encrypted
+sudo chmod 700 /home/${REMOTE_USER}/.ssh
+sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}
+EOFREMOTE
+    
+    cat "${LOCAL_BASE}/.ssh/id_rsa.pub" | ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+        "sudo tee -a /home/${REMOTE_USER}/.ssh/authorized_keys > /dev/null && \
+         sudo chmod 600 /home/${REMOTE_USER}/.ssh/authorized_keys && \
+         sudo chown ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/.ssh/authorized_keys"
+fi
+
+# Copier la clé age sur le serveur
+log_info "Copie de la clé age sur le serveur..."
+cat "$AGE_KEY_FILE" | ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+    "sudo mkdir -p /home/${REMOTE_USER}/.config/syncdir && \
+     sudo tee /home/${REMOTE_USER}/.config/syncdir/age_key.txt > /dev/null && \
+     sudo chmod 600 /home/${REMOTE_USER}/.config/syncdir/age_key.txt && \
+     sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/.config"
+
+remote_encrypted="/home/${REMOTE_USER}/encrypted/${DIR_NAME}"
+local_encrypted="${LOCAL_DIR}/.encrypted_cache"
+
+mkdir -p "$local_encrypted"
+
+ssh "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p ${remote_encrypted}" 2>/dev/null || \
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo mkdir -p ${remote_encrypted} && sudo chown -R ${REMOTE_USER}:${REMOTE_USER} ${remote_encrypted}"
+
+if [ "$IS_RESET" = true ]; then
+    log_warn "Reset du distant"
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo rm -rf ${remote_encrypted}/*"
+    rm -rf "$local_encrypted"/*
+fi
+
+log_info "===== Synchronisation de $DIR_NAME ====="
+
+if [ "$IS_MASTER" = true ]; then
+    log_info "Mode MAITRE"
+    
+    log_info "[1/2] Chiffrement..."
+    find "$LOCAL_DIR" -type f ! -path "*/.encrypted_cache/*" | while read -r file; do
+        rel_path="${file#$LOCAL_DIR/}"
+        encrypted_file="${local_encrypted}/${rel_path}.age"
+        
+        mkdir -p "$(dirname "$encrypted_file")"
+        
+        if [ ! -f "$encrypted_file" ] || [ "$file" -nt "$encrypted_file" ]; then
+            age -r "$AGE_RECIPIENT" -o "$encrypted_file" "$file" 2>/dev/null && \
+                log_info "  ✓ $rel_path"
+        fi
+    done
+    
+    log_info "[2/2] Upload..."
+    rsync -avz --delete -e "ssh" "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
+    
+else
+    log_info "Mode BIDIRECTIONNEL"
+    
+    log_info "[1/4] Chiffrement local..."
+    find "$LOCAL_DIR" -type f ! -path "*/.encrypted_cache/*" | while read -r file; do
+        rel_path="${file#$LOCAL_DIR/}"
+        encrypted_file="${local_encrypted}/${rel_path}.age"
+        
+        mkdir -p "$(dirname "$encrypted_file")"
+        
+        if [ ! -f "$encrypted_file" ] || [ "$file" -nt "$encrypted_file" ]; then
+            age -r "$AGE_RECIPIENT" -o "$encrypted_file" "$file" 2>/dev/null && \
+                log_info "  ✓ $rel_path"
+        fi
+    done
+    
+    log_info "[2/4] Download..."
+    rsync -avz -e "ssh" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/" "${local_encrypted}/"
+    
+    log_info "[3/4] Déchiffrement..."
+    find "$local_encrypted" -type f -name "*.age" | while read -r encrypted_file; do
+        rel_path="${encrypted_file#$local_encrypted/}"
+        rel_path="${rel_path%.age}"
+        decrypted_file="${LOCAL_DIR}/${rel_path}"
+        
+        mkdir -p "$(dirname "$decrypted_file")"
+        
+        if [ ! -f "$decrypted_file" ] || [ "$encrypted_file" -nt "$decrypted_file" ]; then
+            age -d -i "$AGE_KEY_FILE" -o "$decrypted_file" "$encrypted_file" 2>/dev/null && \
+                log_info "  ✓ $rel_path"
+        fi
+    done
+    
+    log_info "[4/4] Upload..."
+    rsync -avz -e "ssh" "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
+fi
+
+ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo chown -R ${REMOTE_USER}:${REMOTE_USER} ${remote_encrypted}" 2>/dev/null
+
+log_info "===== ✓ Synchronisation terminée ====="

@@ -1,0 +1,548 @@
+#!/bin/bash
+
+#############################################
+# syncDir - Script de synchronisation SSH avec chiffrement age
+# Usage: syncDir <repertoire> [maitre|reset]
+#############################################
+
+# Configuration par défaut
+LOCAL_USER=$(whoami)
+LOCAL_BASE="/home/${LOCAL_USER}"
+CONFIG_FILE="${LOCAL_BASE}/.syncdir_age.conf"
+LOCK_DIR="/tmp/syncDir_locks"
+LOG_DIR="${LOCAL_BASE}/.local/log/syncDir"
+
+# Couleurs pour les logs
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; NC=""
+fi
+
+#############################################
+# Fonctions utilitaires
+#############################################
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+    [ -d "$LOG_DIR" ] && echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir_age.log"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1" >&2
+    [ -d "$LOG_DIR" ] && echo "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir_age.log"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+    [ -d "$LOG_DIR" ] && echo "[WARN] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_DIR/syncDir_age.log"
+}
+
+mkdir -p "$LOCK_DIR" "$LOG_DIR" 2>/dev/null
+
+#############################################
+# Vérification age
+#############################################
+
+check_and_install_age() {
+    if ! command -v age &> /dev/null; then
+        log_warn "age n'est pas installé. Installation en cours..."
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y age
+        else
+            log_error "Installez age manuellement: https://github.com/FiloSottile/age"
+            return 1
+        fi
+    else
+        log_info "age installé: $(age --version 2>&1 | head -1)"
+    fi
+    return 0
+}
+
+if ! check_and_install_age; then
+    log_error "Impossible de continuer sans age"
+    exit 1
+fi
+
+#############################################
+# Fonction d'aide
+#############################################
+
+show_help() {
+    cat << 'HELP'
+syncDir_age - Synchronisation SSH avec chiffrement age
+======================================================
+
+USAGE:
+    syncDir_age <repertoire> [--maitre|--reset|--deleteDistant] [--user <username>]
+    syncDir_age --deleteDistant
+    syncDir_age --help
+
+DESCRIPTION:
+    Synchronise un répertoire local avec un serveur distant.
+    - Chiffrement: age (clé symétrique par mot de passe)
+    - Synchronisation: rsync
+    - Le serveur stocke uniquement des fichiers chiffrés (.age)
+
+PARAMÈTRES:
+    <repertoire>    Répertoire à synchroniser (ex: domo, Downloads/ecole)
+    --maitre        Mode priorité locale (push uniquement)
+    --reset         Réinitialiser le distant
+    --deleteDistant Supprimer toutes les données distantes
+    --user <nom>    Synchroniser avec un autre utilisateur
+    --help          Afficher cette aide
+
+EXEMPLES:
+    syncDir_age domo
+    syncDir_age domo --maitre
+    syncDir_age domo --reset
+    syncDir_age --deleteDistant
+    syncDir_age Documents --user emeline
+
+HELP
+}
+
+#############################################
+# Validation des paramètres
+#############################################
+
+if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+    show_help
+    exit 0
+fi
+
+if [ "$1" == "--deleteDistant" ]; then
+    if [ $# -ne 1 ]; then
+        log_error "Usage: syncDir_age --deleteDistant (sans autre argument)"
+        exit 1
+    fi
+    IS_DELETE_DISTANT_STANDALONE=true
+    DIR_NAME="__all__"
+else
+    IS_DELETE_DISTANT_STANDALONE=false
+    
+    if [ $# -lt 1 ]; then
+        log_error "Usage: syncDir_age <repertoire> [options]"
+        echo "Utilisez 'syncDir_age --help' pour plus d'informations"
+        exit 1
+    fi
+fi
+
+#############################################
+# Configuration
+#############################################
+
+create_config() {
+    echo "Configuration initiale de syncDir_age"
+    echo "======================================"
+    echo ""
+    
+    read -p "Adresse IP ou nom d'hôte du serveur distant : " remote_host
+    if [ -z "$remote_host" ]; then
+        echo "Erreur : l'hôte distant est obligatoire"
+        exit 1
+    fi
+    
+    read -p "Utilisateur root distant [root] : " remote_root
+    remote_root=${remote_root:-root}
+    
+    read -p "Répertoire de base distant [/home] : " remote_base
+    remote_base=${remote_base:-/home}
+    
+    echo ""
+    echo "Configuration du chiffrement age"
+    read -sp "Mot de passe de chiffrement : " crypt_password
+    echo ""
+    read -sp "Confirmez le mot de passe : " crypt_password2
+    echo ""
+    
+    if [ "$crypt_password" != "$crypt_password2" ]; then
+        echo "Erreur : les mots de passe ne correspondent pas"
+        exit 1
+    fi
+    
+    if [ -z "$crypt_password" ]; then
+        echo "Erreur : le mot de passe est obligatoire"
+        exit 1
+    fi
+    
+    cat > "$CONFIG_FILE" <<EOFCONFIG
+# Configuration syncDir_age
+# Généré le $(date '+%Y-%m-%d %H:%M:%S')
+
+REMOTE_HOST="$remote_host"
+REMOTE_ROOT="$remote_root"
+REMOTE_BASE="$remote_base"
+CRYPT_PASSWORD="$crypt_password"
+EOFCONFIG
+    
+    chmod 600 "$CONFIG_FILE"
+    echo ""
+    echo "Configuration sauvegardée dans $CONFIG_FILE"
+    echo ""
+}
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    create_config
+fi
+
+source "$CONFIG_FILE"
+
+#############################################
+# Parser les options
+#############################################
+
+if [ "$IS_DELETE_DISTANT_STANDALONE" = true ]; then
+    IS_MASTER=false
+    IS_RESET=false
+    IS_DELETE_DISTANT=true
+    SYNC_AS_USER=""
+else
+    DIR_NAME="$1"
+    IS_MASTER=false
+    IS_RESET=false
+    IS_DELETE_DISTANT=false
+    SYNC_AS_USER=""
+
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            maitre|--maitre)
+                IS_MASTER=true
+                log_info "Mode MAITRE activé"
+                shift
+                ;;
+            reset|--reset)
+                IS_RESET=true
+                log_info "Mode RESET activé"
+                shift
+                ;;
+            deleteDistant|--deleteDistant)
+                IS_DELETE_DISTANT=true
+                log_warn "Mode DELETE DISTANT activé"
+                shift
+                ;;
+            --user)
+                if [ -z "$2" ]; then
+                    log_error "Option --user nécessite un nom"
+                    exit 1
+                fi
+                SYNC_AS_USER="$2"
+                log_info "Utilisateur distant: ${SYNC_AS_USER}Sync"
+                shift 2
+                ;;
+            *)
+                log_error "Option invalide: $1"
+                exit 1
+                ;;
+        esac
+    done
+fi
+
+# Déterminer les chemins
+if [ "$IS_DELETE_DISTANT_STANDALONE" = false ]; then
+    if [[ "$DIR_NAME" = /* ]]; then
+        LOCAL_DIR="$DIR_NAME"
+        DIR_NAME_SAFE="$(basename "$DIR_NAME")"
+    else
+        LOCAL_DIR="${LOCAL_BASE}/${DIR_NAME}"
+        DIR_NAME_SAFE="${DIR_NAME//\//_}"
+    fi
+    LOCK_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.lock"
+    STATE_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.state"
+else
+    LOCAL_DIR=""
+    DIR_NAME_SAFE="__deleteall__"
+    LOCK_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.lock"
+    STATE_FILE="${LOCK_DIR}/${DIR_NAME_SAFE}.state"
+fi
+
+# Utilisateur distant
+if [ -n "$SYNC_AS_USER" ]; then
+    REMOTE_USER="${SYNC_AS_USER}Sync"
+else
+    REMOTE_USER="${LOCAL_USER}Sync"
+fi
+
+#############################################
+# Vérifications
+#############################################
+
+if [ "$IS_DELETE_DISTANT_STANDALONE" = false ] && [ ! -d "$LOCAL_DIR" ]; then
+    log_error "Le répertoire local n'existe pas: $LOCAL_DIR"
+    exit 1
+fi
+
+if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "${REMOTE_ROOT}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
+    log_error "Impossible de se connecter au serveur distant ${REMOTE_HOST}"
+    exit 1
+fi
+
+#############################################
+# Gestion du verrou
+#############################################
+
+acquire_lock() {
+    if [ -f "$LOCK_FILE" ]; then
+        local pid=$(cat "$LOCK_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            log_warn "Synchronisation déjà en cours (PID: $pid)"
+            exit 0
+        else
+            log_warn "Suppression verrou obsolète (PID: $pid)"
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+    echo $$ > "$LOCK_FILE"
+}
+
+release_lock() {
+    rm -f "$LOCK_FILE"
+}
+
+trap release_lock EXIT INT TERM
+acquire_lock
+
+#############################################
+# Clé SSH
+#############################################
+
+ensure_ssh_key() {
+    local ssh_dir="${LOCAL_BASE}/.ssh"
+    local ssh_key="${ssh_dir}/id_rsa"
+    local ssh_pub="${ssh_key}.pub"
+    
+    if [ ! -d "$ssh_dir" ]; then
+        mkdir -p "$ssh_dir"
+        chmod 700 "$ssh_dir"
+    fi
+    
+    if [ ! -f "$ssh_key" ] || [ ! -f "$ssh_pub" ]; then
+        log_warn "Génération de la clé SSH..."
+        ssh-keygen -t rsa -b 4096 -f "$ssh_key" -N "" -C "${LOCAL_USER}@syncDir-$(date +%Y%m%d)"
+        chmod 600 "$ssh_key"
+        chmod 644 "$ssh_pub"
+        log_info "Clé SSH générée"
+    fi
+    
+    return 0
+}
+
+#############################################
+# Utilisateur distant
+#############################################
+
+create_remote_user() {
+    log_info "Vérification utilisateur distant: ${REMOTE_USER}"
+    
+    if ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "id ${REMOTE_USER} &>/dev/null"; then
+        log_info "Utilisateur ${REMOTE_USER} existe"
+    else
+        log_info "Création utilisateur ${REMOTE_USER}..."
+        
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFREMOTE
+            sudo useradd -m -s /bin/bash ${REMOTE_USER}
+            sudo mkdir -p /home/${REMOTE_USER}/encrypted
+            sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}
+            sudo mkdir -p /home/${REMOTE_USER}/.ssh
+            sudo chmod 700 /home/${REMOTE_USER}/.ssh
+            sudo chown ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/.ssh
+EOFREMOTE
+        
+        if [ $? -ne 0 ]; then
+            log_error "Échec création utilisateur ${REMOTE_USER}"
+            return 1
+        fi
+        
+        log_info "Utilisateur ${REMOTE_USER} créé"
+    fi
+    
+    # Copier clé SSH
+    if [ -f "${LOCAL_BASE}/.ssh/id_rsa.pub" ]; then
+        local ssh_key_content=$(cat "${LOCAL_BASE}/.ssh/id_rsa.pub")
+        local key_exists=$(ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+            "sudo grep -F '${ssh_key_content}' /home/${REMOTE_USER}/.ssh/authorized_keys 2>/dev/null || echo ''")
+        
+        if [ -z "$key_exists" ]; then
+            log_info "Copie clé SSH..."
+            cat "${LOCAL_BASE}/.ssh/id_rsa.pub" | ssh "${REMOTE_ROOT}@${REMOTE_HOST}" \
+                "sudo mkdir -p /home/${REMOTE_USER}/.ssh && \
+                 sudo tee -a /home/${REMOTE_USER}/.ssh/authorized_keys > /dev/null && \
+                 sudo chmod 700 /home/${REMOTE_USER}/.ssh && \
+                 sudo chmod 600 /home/${REMOTE_USER}/.ssh/authorized_keys && \
+                 sudo chown -R ${REMOTE_USER}:${REMOTE_USER} /home/${REMOTE_USER}/.ssh"
+            
+            if [ $? -eq 0 ]; then
+                log_info "Clé SSH copiée"
+            fi
+        fi
+    fi
+    
+    return 0
+}
+
+#############################################
+# Synchronisation
+#############################################
+
+sync_directories() {
+    local remote_encrypted="/home/${REMOTE_USER}/encrypted/${DIR_NAME}"
+    local local_encrypted="${LOCAL_DIR}/.encrypted_cache"
+    
+    mkdir -p "$local_encrypted"
+    
+    # Créer répertoire distant
+    ssh "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p ${remote_encrypted}" 2>/dev/null || \
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo mkdir -p ${remote_encrypted} && sudo chown -R ${REMOTE_USER}:${REMOTE_USER} ${remote_encrypted}"
+    
+    if [ "$IS_MASTER" = true ]; then
+        log_info "Mode MAITRE: LOCAL → DISTANT"
+        
+        # Chiffrer fichiers locaux
+        log_info "Chiffrement..."
+        find "$LOCAL_DIR" -type f ! -path "*/.encrypted_cache/*" | while read -r file; do
+            rel_path="${file#$LOCAL_DIR/}"
+            encrypted_file="${local_encrypted}/${rel_path}.age"
+            
+            mkdir -p "$(dirname "$encrypted_file")"
+            
+            if [ ! -f "$encrypted_file" ] || [ "$file" -nt "$encrypted_file" ]; then
+                { echo "$CRYPT_PASSWORD"; echo "$CRYPT_PASSWORD"; } | age -p -a -o "$encrypted_file" "$file" 2>/dev/null && \
+                    log_info "  ✓ $rel_path"
+            fi
+        done
+        
+        # Sync vers distant
+        log_info "Synchronisation..."
+        rsync -avz --delete -e "ssh -o ConnectTimeout=30" \
+            "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
+        
+        local sync_result=$?
+        
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo chown -R ${REMOTE_USER}:${REMOTE_USER} ${remote_encrypted}" 2>/dev/null
+        
+        if [ $sync_result -eq 0 ]; then
+            log_info "Synchronisation réussie"
+            echo "completed" > "$STATE_FILE"
+            return 0
+        else
+            log_error "Erreur synchronisation (code: $sync_result)"
+            echo "failed:$sync_result" > "$STATE_FILE"
+            return 1
+        fi
+    else
+        log_info "Mode BIDIRECTIONNEL"
+        
+        # 1. Chiffrer fichiers locaux modifiés
+        log_info "[1/4] Chiffrement fichiers locaux..."
+        find "$LOCAL_DIR" -type f ! -path "*/.encrypted_cache/*" | while read -r file; do
+            rel_path="${file#$LOCAL_DIR/}"
+            encrypted_file="${local_encrypted}/${rel_path}.age"
+            
+            mkdir -p "$(dirname "$encrypted_file")"
+            
+            if [ ! -f "$encrypted_file" ] || [ "$file" -nt "$encrypted_file" ]; then
+                { echo "$CRYPT_PASSWORD"; echo "$CRYPT_PASSWORD"; } | age -p -a -o "$encrypted_file" "$file" 2>/dev/null && \
+                    log_info "  ✓ $rel_path"
+            fi
+        done
+        
+        # 2. Télécharger fichiers distants
+        log_info "[2/4] Téléchargement depuis serveur..."
+        rsync -avz -e "ssh -o ConnectTimeout=30" \
+            "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/" "${local_encrypted}/"
+        
+        # 3. Déchiffrer nouveaux fichiers
+        log_info "[3/4] Déchiffrement..."
+        find "$local_encrypted" -type f -name "*.age" | while read -r encrypted_file; do
+            rel_path="${encrypted_file#$local_encrypted/}"
+            rel_path="${rel_path%.age}"
+            decrypted_file="${LOCAL_DIR}/${rel_path}"
+            
+            mkdir -p "$(dirname "$decrypted_file")"
+            
+            if [ ! -f "$decrypted_file" ] || [ "$encrypted_file" -nt "$decrypted_file" ]; then
+                { echo "$CRYPT_PASSWORD"; echo "$CRYPT_PASSWORD"; } | age -d -p "$encrypted_file" > "$decrypted_file" 2>/dev/null && \
+                    log_info "  ✓ $rel_path"
+            fi
+        done
+        
+        # 4. Envoyer modifications locales
+        log_info "[4/4] Envoi modifications..."
+        rsync -avz -e "ssh -o ConnectTimeout=30" \
+            "${local_encrypted}/" "${REMOTE_USER}@${REMOTE_HOST}:${remote_encrypted}/"
+        
+        local sync_result=$?
+        
+        ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo chown -R ${REMOTE_USER}:${REMOTE_USER} ${remote_encrypted}" 2>/dev/null
+        
+        if [ $sync_result -eq 0 ]; then
+            log_info "Synchronisation bidirectionnelle réussie"
+            echo "completed" > "$STATE_FILE"
+            return 0
+        else
+            log_error "Erreur synchronisation"
+            echo "failed" > "$STATE_FILE"
+            return 1
+        fi
+    fi
+}
+
+#############################################
+# Exécution principale
+#############################################
+
+log_info "===== Début synchronisation: $DIR_NAME ====="
+
+if ! ensure_ssh_key; then
+    log_error "Impossible de gérer la clé SSH"
+    exit 1
+fi
+
+if ! create_remote_user; then
+    log_error "Impossible de gérer l'utilisateur distant"
+    exit 1
+fi
+
+# Mode deleteDistant
+if [ "$IS_DELETE_DISTANT" = true ]; then
+    log_warn "SUPPRESSION DONNÉES DISTANTES"
+    read -p "Confirmez (tapez 'OUI'): " confirmation
+    
+    if [ "$confirmation" != "OUI" ]; then
+        log_info "Annulé"
+        exit 0
+    fi
+    
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" bash <<EOFDELETE
+        if id "${REMOTE_USER}" &>/dev/null; then
+            sudo userdel -r "${REMOTE_USER}" 2>/dev/null || true
+        fi
+        if [ -d "/home/${REMOTE_USER}" ]; then
+            sudo rm -rf "/home/${REMOTE_USER}"
+        fi
+EOFDELETE
+    
+    log_info "Suppression terminée"
+    rm -f "$STATE_FILE"
+    exit 0
+fi
+
+# Mode reset
+if [ "$IS_RESET" = true ]; then
+    log_warn "Effacement répertoire distant"
+    ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "sudo rm -rf /home/${REMOTE_USER}/encrypted/${DIR_NAME}/*" 2>/dev/null
+    rm -f "$STATE_FILE"
+    rm -rf "${LOCAL_DIR}/.encrypted_cache"
+fi
+
+if sync_directories; then
+    log_info "===== Synchronisation terminée avec succès ====="
+    exit 0
+else
+    log_error "===== Échec synchronisation ====="
+    exit 1
+fi

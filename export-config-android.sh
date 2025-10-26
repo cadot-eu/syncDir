@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script d'export de configuration syncDir pour Android
+# Export configuration pour Android (OpenSSL AES)
 
 set -e
 
@@ -8,82 +8,122 @@ SSH_KEY_FILE="$HOME/.ssh/id_rsa"
 OUTPUT_FILE="$HOME/syncdir-android-config.json"
 
 echo "=========================================="
-echo "  Export Configuration SyncDir Android"
+echo "  Export Configuration SyncDir (OpenSSL)"
 echo "=========================================="
 echo ""
 
-# Vérifier les fichiers
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "❌ Fichier de configuration introuvable: $CONFIG_FILE"
+    echo "❌ Configuration introuvable: $CONFIG_FILE"
     exit 1
 fi
 
 if [ ! -f "$SSH_KEY_FILE" ]; then
-    echo "⚠️  Clé SSH RSA introuvable: $SSH_KEY_FILE"
+    echo "❌ Clé SSH introuvable: $SSH_KEY_FILE"
     exit 1
 fi
 
-# Charger la config
 source "$CONFIG_FILE"
 
-# Lire la clé SSH et l'échapper correctement en JSON
+# Lire clé SSH
 SSH_KEY=$(cat "$SSH_KEY_FILE" | jq -Rs .)
 
-# Décoder le mot de passe obscurci par rclone
-DECODED_PASSWORD=$(rclone reveal "$CRYPT_PASSWORD")
+echo "✓ Configuration chargée"
+echo "✓ Mot de passe: $CRYPT_PASSWORD"
 
-# Déterminer le nom du répertoire chiffré sur le serveur
-# En se connectant via SSH et en listant /home/{user}Sync/encrypted/
-echo "Récupération du nom de répertoire chiffré sur le serveur..."
-ENCRYPTED_DIR=$(ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "ls /home/$(whoami)Sync/encrypted/ 2>/dev/null | head -1")
+# Récupérer répertoires sur serveur
+echo ""
+echo "Récupération répertoires..."
+ENCRYPTED_DIRS=$(ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "ls -1 /home/$(whoami)Sync/encrypted/ 2>/dev/null" || echo "")
 
-if [ -z "$ENCRYPTED_DIR" ]; then
-    echo "⚠️  Aucun répertoire chiffré trouvé, utilisation de 'cloud' par défaut"
-    ENCRYPTED_DIR="cloud"
-else
-    echo "✓ Répertoire chiffré trouvé: $ENCRYPTED_DIR"
+if [ -z "$ENCRYPTED_DIRS" ]; then
+    echo "⚠️  Aucun répertoire trouvé"
+    ENCRYPTED_DIRS="domo"
 fi
 
-# Créer le JSON avec le bon utilisateur (michaelSync) et le mot de passe décodé
-cat > "$OUTPUT_FILE" << JSONEOF
+# Compter et afficher
+DIR_COUNT=$(echo "$ENCRYPTED_DIRS" | wc -l)
+echo "✓ Répertoires trouvés: $DIR_COUNT"
+echo "$ENCRYPTED_DIRS" | sed 's/^/  - /'
+
+# Créer JSON avec jq directement
+cat > "${OUTPUT_FILE}.tmp" << 'JSONEOF'
 {
-  "version": "1.0",
-  "exported_at": "$(date -Iseconds)",
+  "version": "3.0-openssl",
   "server": {
-    "name": "$REMOTE_HOST",
-    "hostname": "$REMOTE_HOST",
-    "port": 22,
-    "ssh_key": ${SSH_KEY}
+    "name": "",
+    "hostname": "",
+    "port": 22
   },
-  "users": [
-    {
-      "name": "$(whoami) - Main",
-      "username": "$(whoami)Sync",
-      "remote_directory": "$ENCRYPTED_DIR",
-      "password": "$DECODED_PASSWORD"
-    }
-  ]
+  "users": []
 }
 JSONEOF
 
-# Valider le JSON
+# Construire JSON avec jq
+jq -n \
+  --arg version "3.0-openssl" \
+  --arg exported_at "$(date -Iseconds)" \
+  --arg hostname "$REMOTE_HOST" \
+  --arg ssh_key "$(cat "$SSH_KEY_FILE")" \
+  --arg username "$(whoami)Sync" \
+  --arg password "$CRYPT_PASSWORD" \
+  '{
+    version: $version,
+    exported_at: $exported_at,
+    server: {
+      name: $hostname,
+      hostname: $hostname,
+      port: 22,
+      ssh_key: $ssh_key
+    },
+    users: []
+  }' > "${OUTPUT_FILE}.tmp"
+
+# Ajouter les utilisateurs un par un avec jq
+while IFS= read -r dir; do
+    [ -z "$dir" ] && continue
+    
+    jq --arg name "$(whoami) - $dir" \
+       --arg username "$(whoami)Sync" \
+       --arg remote_dir "$dir" \
+       --arg password "$CRYPT_PASSWORD" \
+       '.users += [{
+         name: $name,
+         username: $username,
+         remote_directory: $remote_dir,
+         password: $password
+       }]' "${OUTPUT_FILE}.tmp" > "${OUTPUT_FILE}.tmp2"
+    mv "${OUTPUT_FILE}.tmp2" "${OUTPUT_FILE}.tmp"
+done <<< "$ENCRYPTED_DIRS"
+
+mv "${OUTPUT_FILE}.tmp" "$OUTPUT_FILE"
+
+# Valider JSON
 if jq . "$OUTPUT_FILE" > /dev/null 2>&1; then
-    echo "✅ Configuration exportée vers: $OUTPUT_FILE"
+    echo ""
+    echo "✅ Configuration exportée: $OUTPUT_FILE"
 else
-    echo "❌ Erreur: JSON invalide généré"
+    echo "❌ JSON invalide"
     exit 1
 fi
 
+# Envoyer sur téléphone
 echo ""
-echo "📱 Pour importer dans l'application Android:"
-echo "   1. Transférez le fichier sur votre téléphone:"
-echo "      adb push $OUTPUT_FILE /sdcard/Download/syncdir_config.json"
-echo ""
-echo "   2. Dans l'app, utilisez le menu (3 points) > \"Importer JSON\""
-echo ""
-echo "🔒 ATTENTION: Ce fichier contient des données sensibles!"
+echo "📱 Envoi sur téléphone..."
+if adb push "$OUTPUT_FILE" /sdcard/Download/syncdir_config.json 2>&1; then
+    echo "✅ Fichier envoyé!"
+    echo ""
+    echo "📲 Dans l'app:"
+    echo "   1. Menu (⋮) → Importer configuration"
+    echo "   2. Sélectionner syncdir_config.json"
+    echo ""
+else
+    echo ""
+    echo "⚠️  Transfert ADB échoué. Transférez manuellement:"
+    echo "   adb push $OUTPUT_FILE /sdcard/Download/syncdir_config.json"
+    echo ""
+fi
+
+echo "🔒 ATTENTION: Ce fichier contient:"
 echo "   - Clé SSH privée"
-echo "   - Mot de passe de chiffrement EN CLAIR"
+echo "   - Mot de passe chiffrement"
 echo "   Supprimez-le après import!"
-echo ""
-echo "Fichier généré avec succès!"
