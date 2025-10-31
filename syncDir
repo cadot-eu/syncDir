@@ -294,6 +294,15 @@ fi
 EOFDELETE
         
         log_info "L'utilisateur ${REMOTE_USER} a été supprimé"
+        
+        # Nettoyer le cache local
+        local_cache="${LOCAL_DIR}/.encrypted_cache"
+        if [ -d "$local_cache" ]; then
+            log_info "Nettoyage du cache local: $local_cache"
+            rm -rf "$local_cache"
+            log_info "Cache local supprimé"
+        fi
+        
         log_info "Opération terminée avec succès"
     fi
     exit 0
