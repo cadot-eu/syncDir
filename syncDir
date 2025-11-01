@@ -43,7 +43,8 @@ syncDir - Synchronisation SSH avec chiffrement AES
 ===================================================
 
 USAGE:
-    syncDir <repertoire> [--maitre|--reset|--deleteDistant] [--user <username>]
+    syncDir <repertoire> [--maitre|--reset|--deleteDistant|--share] [--user <username>]
+    syncDir <repertoire> --share
     syncDir --deleteDistant
     syncDir --help
 
@@ -58,6 +59,7 @@ OPTIONS:
     --maitre        LOCAL → DISTANT uniquement (écrase distant)
     --reset         Efface distant et resynchronise
     --deleteDistant Supprime TOUT (utilisateur + données)
+    --share         Crée un fichier .syn pour partager le répertoire
     --user <nom>    Synchronise avec autre utilisateur (ex: emeline)
     --password <pw> Mot de passe de chiffrement personnalisé
 
@@ -68,6 +70,9 @@ EXEMPLES:
     syncDir --deleteDistant
     syncDir Documents --user emeline
     syncDir justificatifs --user emeline --password **********
+
+PARTAGE SÉCURISÉ:
+    syncDir domo --share              # Crée domo.syn pour partage
 
 HELP
 }
@@ -80,6 +85,7 @@ fi
 IS_MASTER=false
 IS_RESET=false
 IS_DELETE_DISTANT=false
+IS_SHARE=false
 SYNC_AS_USER=""
 CUSTOM_PASSWORD=""
 DIR_NAME=""
@@ -93,12 +99,27 @@ else
         exit 1
     fi
     DIR_NAME="$1"
+    
+    # Vérifier que le nom ne commence pas par --
+    if [[ "$DIR_NAME" =~ ^-- ]]; then
+        # Messages spécifiques pour certaines options
+        if [ "$DIR_NAME" == "--share" ]; then
+            log_error "L'option --share nécessite un nom de répertoire"
+            log_error "Usage: syncDir <repertoire> --share"
+        else
+            log_error "Paramètre inconnu: $DIR_NAME"
+            log_error "Utilisez 'syncDir --help' pour voir les options disponibles"
+        fi
+        exit 1
+    fi
+    
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
             maitre|--maitre) IS_MASTER=true; shift ;;
             reset|--reset) IS_RESET=true; shift ;;
             deleteDistant|--deleteDistant) IS_DELETE_DISTANT=true; shift ;;
+            share|--share) IS_SHARE=true; shift ;;
             --user) SYNC_AS_USER="$2"; shift 2 ;;
             --password) CUSTOM_PASSWORD="$2"; shift 2 ;;
             *) log_error "Option invalide: $1"; exit 1 ;;
@@ -230,6 +251,85 @@ if [ -f "${SSH_KEY_FILE}.pub" ]; then
     fi
 fi
 
+# Mode partage : créer un fichier .syn
+if [ "$IS_SHARE" = true ]; then
+    log_info "=========================================="
+    log_info "  Création partage sécurisé: $DIR_NAME"
+    log_info "=========================================="
+    echo ""
+    
+    SHARE_FILE="${DIR_NAME//\//_}.syn"
+    
+    if [ ! -f "$SSH_KEY_FILE" ]; then
+        log_error "Clé SSH introuvable: $SSH_KEY_FILE"
+        log_error "Vous devez d'abord synchroniser avec: syncDir ${DIR_NAME}"
+        exit 1
+    fi
+    log_info "✓ Clé SSH trouvée: $SSH_KEY_FILE"
+    
+    # Vérifier que l'utilisateur distant existe
+    log_info "Vérification de l'utilisateur distant..."
+    if ! ssh "${REMOTE_ROOT}@${REMOTE_HOST}" "id ${REMOTE_USER} &>/dev/null"; then
+        log_error "L'utilisateur ${REMOTE_USER} n'existe pas sur le serveur"
+        log_error "Vous devez d'abord synchroniser avec: syncDir ${DIR_NAME}"
+        exit 1
+    fi
+    log_info "✓ Utilisateur ${REMOTE_USER} trouvé sur le serveur"
+    
+    # Demander mot de passe de partage
+    echo ""
+    read -sp "Mot de passe de partage (pour chiffrer le fichier): " SHARE_PASSWORD
+    echo ""
+    
+    if [ -z "$SHARE_PASSWORD" ]; then
+        log_error "Mot de passe requis"
+        exit 1
+    fi
+    
+    # Créer fichier de partage JSON
+    log_info "Génération fichier de partage..."
+    
+    if ! command -v jq &> /dev/null; then
+        log_error "jq n'est pas installé. Installez-le avec: sudo apt install jq"
+        exit 1
+    fi
+    
+    JSON_CONTENT=$(jq -n \
+      --arg version "3.0-share-encrypted" \
+      --arg created "$(date -Iseconds)" \
+      --arg hostname "$REMOTE_HOST" \
+      --arg port "22" \
+      --arg ssh_key "$(cat "$SSH_KEY_FILE")" \
+      --arg username "$REMOTE_USER" \
+      --arg directory "$DIR_NAME" \
+      --arg password "$CRYPT_PASSWORD" \
+      --arg shared_by "$LOCAL_USER" \
+      --arg share_name "${LOCAL_USER} - ${DIR_NAME}" \
+      '{
+        version: $version,
+        share_type: "single_directory",
+        created_at: $created,
+        shared_by: $shared_by,
+        share_name: $share_name,
+        hostname: $hostname,
+        port: ($port | tonumber),
+        ssh_key: $ssh_key,
+        username: $username,
+        remote_directory: $directory,
+        password: $password
+      }')
+    
+    # Chiffrer avec OpenSSL AES-256-CBC
+    log_info "Chiffrement du fichier..."
+    echo "$JSON_CONTENT" | openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$SHARE_PASSWORD" | base64 -w 0 > "$SHARE_FILE"
+    
+    echo ""
+    log_info "✅ Partage créé: $(pwd)/$SHARE_FILE"
+    log_warn "⚠️  Communiquer le mot de passe séparément!"
+    echo ""
+    exit 0
+fi
+
 if [ "$IS_DELETE_DISTANT" = true ]; then
     if [ "$DIR_NAME" = "__all__" ]; then
         # Supprimer TOUS les utilisateurs ${LOCAL_USER}Sync_*
@@ -262,6 +362,15 @@ echo "Suppression terminée"
 EOFDELETE
         
         log_info "Tous les utilisateurs (${LOCAL_USER}Sync_*) ont été supprimés"
+        
+        # Nettoyer TOUS les caches locaux
+        log_info "Nettoyage des caches locaux..."
+        find "${LOCAL_BASE}" -type d -name ".encrypted_cache" 2>/dev/null | while read -r cache_dir; do
+            log_info "Suppression cache: $cache_dir"
+            rm -rf "$cache_dir"
+        done
+        log_info "Caches locaux supprimés"
+        
         log_info "Opération terminée avec succès"
     else
         # Supprimer un utilisateur spécifique
